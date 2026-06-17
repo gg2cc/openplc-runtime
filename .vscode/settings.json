@@ -14,5 +14,12 @@
     "[c]": {
         "editor.defaultFormatter": "xaver.clang-format"
     },
-    "editor.formatOnSave": true
+    "editor.formatOnSave": true,
+    "ROS2.distro": "foxy",
+    "python.autoComplete.extraPaths": [
+        "/opt/ros/foxy/lib/python3.8/site-packages"
+    ],
+    "python.analysis.extraPaths": [
+        "/opt/ros/foxy/lib/python3.8/site-packages"
+    ]
 }
