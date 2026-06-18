@@ -803,7 +803,7 @@ int plugin_driver_start(plugin_driver_t *driver)
             {
                 // Acquire GIL for this specific Python call
                 PyGILState_STATE local_gil = PyGILState_Ensure();
-                PyObject *res              = PyObject_CallNoArgs(plugin->python_plugin->pFuncStart);
+                PyObject *res              = PyObject_CallObject(plugin->python_plugin->pFuncStart, NULL);
                 if (!res)
                 {
                     PyErr_Print();
@@ -898,7 +898,7 @@ int plugin_driver_stop(plugin_driver_t *driver)
         log_info("Stopping plugin %d/%d: %s", i + 1, driver->plugin_count, plugin->config.name);
         if (plugin->python_plugin && plugin->python_plugin->pFuncStop)
         {
-            PyObject *res = PyObject_CallNoArgs(plugin->python_plugin->pFuncStop);
+            PyObject *res = PyObject_CallObject(plugin->python_plugin->pFuncStop, NULL);
             if (!res)
             {
                 PyErr_Print();

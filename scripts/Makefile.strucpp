@@ -73,8 +73,9 @@ CC     := $(if $(CCACHE),$(CCACHE) gcc,gcc)
 # preserve. Verified on an SLM-RP4: with the flag the .so leaves
 # /proc/<pid>/maps on every stop and re-maps fresh on every start; without it,
 # it never leaves -- one build's image stays pinned for the life of the process.
-CXXFLAGS := -std=c++17 -O1 -pipe -fPIC -Wall -DSTRUCPP_THREADED -fno-gnu-unique -MMD -MP \
-            -Wno-unknown-pragmas -Wno-deprecated-declarations \
+CXXFLAGS := -std=c++17 -O1 -pipe -fPIC -Wall -Wextra -fstack-protector-strong -D_FORTIFY_SOURCE=2 \
+            -Wformat -Werror=format-security -DSTRUCPP_THREADED -fno-gnu-unique -MMD -MP \
+            -Wno-unknown-pragmas -Wno-deprecated-declarations -Wno-ignored-qualifiers \
             -I $(GENERATED_DIR) -I $(RUNTIME_INC) -I $(PYTHON_INC)
 
 # Python POU stubs (`{external …}` blocks emitted by the editor) call
@@ -121,7 +122,7 @@ all: $(LIBPLC)
 # objects are interchangeable. -lpthread / -lrt match the historical
 # compile.sh.
 $(LIBPLC): $(GEN_OBJ) $(SHIM_OBJ) $(EXTRA_OBJS) | $(BUILD_DIR)
-	g++ -shared -fPIC -o $@ $^ -lpthread -lrt
+	g++ -shared -fPIC -o $@ $^ -lpthread -lrt $(LDFLAGS)
 	@echo "[INFO] Build complete: $@"
 
 # Generated TUs from the editor's upload. Force-include iec_python.h
@@ -148,7 +149,9 @@ $(SHIM_OBJ): $(RUNTIME_SHIM) $(GENERATED_DIR)/generated.hpp $(GENERATED_DIR)/def
 # include path so it sees iec_python.h alongside its own headers.
 $(BUILD_DIR)/python_loader.o: $(PYTHON_LOADER) | $(BUILD_DIR)
 	@echo "[INFO] Compiling python_loader.c..."
-	$(CC) -O2 -fPIC -MMD -MP -I core/src/plc_app -c $< -o $@
+	$(CC) -O2 -fPIC -Wall -Wextra -fstack-protector-strong -D_FORTIFY_SOURCE=2 \
+          -Wformat -Werror=format-security -Wno-stringop-truncation \
+          -MMD -MP -I core/src/plc_app -c $< -o $@
 
 # Cygwin TCP/UDP stub — written on demand, then compiled.
 $(BUILD_DIR)/comm_stubs.o: | $(BUILD_DIR)
