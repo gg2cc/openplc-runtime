@@ -1,6 +1,6 @@
 # OPC-UA Plugin Dependencies for OpenPLC Runtime
 # Main OPC-UA library for async server implementation
-asyncua==1.1.8
+asyncua>=1.1.8
 
 # System monitoring for network interface detection (optional on MSYS2/Cygwin)
 # The code has socket-based fallbacks when psutil is unavailable (see opcua_endpoints_config.py)

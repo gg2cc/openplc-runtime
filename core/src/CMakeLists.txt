@@ -6,8 +6,24 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Find Python development libraries
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(PYTHON REQUIRED python3-embed)
+if(DEFINED ENV{PYTHON_BIN})
+    # If PYTHON_BIN is set, use it as a hint for find_package
+    get_filename_component(PYTHON_BIN_DIR $ENV{PYTHON_BIN} DIRECTORY)
+    get_filename_component(PYTHON_ROOT_DIR ${PYTHON_BIN_DIR} DIRECTORY)
+    set(Python3_ROOT_DIR ${PYTHON_ROOT_DIR})
+    set(Python3_EXECUTABLE $ENV{PYTHON_BIN})
+    
+    # Use 'Development' instead of 'Development.Embed' for CMake 3.16 compatibility
+    find_package(Python3 REQUIRED COMPONENTS Interpreter Development)
+    set(PYTHON_INCLUDE_DIRS ${Python3_INCLUDE_DIRS})
+    set(PYTHON_LIBRARIES ${Python3_LIBRARIES})
+    message(STATUS "Using Python3 from PYTHON_BIN: ${Python3_EXECUTABLE} (version ${Python3_VERSION})")
+    message(STATUS "Python3 Include Dirs: ${PYTHON_INCLUDE_DIRS}")
+    message(STATUS "Python3 Libraries: ${PYTHON_LIBRARIES}")
+else()
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(PYTHON REQUIRED python3-embed)
+endif()
 
 # Include directories.
 #
@@ -16,11 +32,11 @@ pkg_check_modules(PYTHON REQUIRED python3-embed)
 # We do NOT vendor strucpp's full runtime headers into the runtime —
 # those ship with each user-program upload and are only consumed by
 # scripts/compile.sh when building the .so.
+include_directories(BEFORE ${PYTHON_INCLUDE_DIRS})
 include_directories(${CMAKE_SOURCE_DIR}/core/src/plc_app
                     ${CMAKE_SOURCE_DIR}/core/src/plc_app/utils
                     ${CMAKE_SOURCE_DIR}/core/generated/plc_lib
-                    ${CMAKE_SOURCE_DIR}/core/generated/plc_lib/lib
-                    ${PYTHON_INCLUDE_DIRS})
+                    ${CMAKE_SOURCE_DIR}/core/generated/plc_lib/lib)
 
 # Compiler options
 add_compile_options(-Wall -Werror -Wextra -fstack-protector-strong
@@ -58,6 +74,17 @@ target_link_libraries(plc_main
     pthread
     ${PYTHON_LIBRARIES}
 )
+
+# Set RPATH for Python library if using custom path
+if(DEFINED ENV{PYTHON_BIN})
+    get_filename_component(PYTHON_LIB_DIR ${Python3_LIBRARIES} DIRECTORY)
+    set_target_properties(plc_main PROPERTIES
+        SKIP_BUILD_RPATH FALSE
+        BUILD_WITH_INSTALL_RPATH TRUE
+        INSTALL_RPATH "${PYTHON_LIB_DIR}"
+        INSTALL_RPATH_USE_LINK_PATH TRUE
+    )
+endif()
 
 # Some 64-bit atomic operations (e.g. std::atomic<uint64_t> in the scan-cycle
 # bookkeeping) are lowered to libatomic calls on 32-bit targets such as armv7

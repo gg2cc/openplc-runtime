@@ -6,6 +6,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OPENPLC_DIR="$SCRIPT_DIR"
 VENV_DIR="$OPENPLC_DIR/venvs/runtime"
 
+# Setup runtime venv and environment variables
+export PY310_PATH="/opt/python310"
+export PYTHONHOME="/opt/python310"
+# Ensure the Python binary is in PATH and libraries are in LD_LIBRARY_PATH
+export PATH="$PY310_PATH/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"
+export LD_LIBRARY_PATH="$PY310_PATH/lib:${LD_LIBRARY_PATH:-}"
+# Set PYTHONPATH to include the project directory so plugins can import shared modules
+export PYTHONPATH="$OPENPLC_DIR"
+
 # Ensure we're in the project directory
 cd "$OPENPLC_DIR"
 

@@ -102,6 +102,14 @@ has_systemd_support() {
 install_systemd_service() {
     local service_file="/etc/systemd/system/openplc-runtime.service"
 
+    if [ -f "$service_file" ]; then
+        log_info "OpenPLC Runtime systemd service already installed, restarting..."
+        # Make sure it's started and enabled anyway
+        systemctl enable "$service_file" >/dev/null 2>&1 || true
+        systemctl restart openplc-runtime.service >/dev/null 2>&1 || true
+        return 0
+    fi
+
     log_info "Installing OpenPLC Runtime systemd service..."
 
     # Create the service file
@@ -456,9 +464,11 @@ build_native_plugins() {
     mkdir -p "$plugins_output_dir"
 
     # Initialize git submodules (needed by plugins that vendor libraries like SOEM)
-    if [ -f "$OPENPLC_DIR/.gitmodules" ]; then
+    if [ -f "$OPENPLC_DIR/.gitmodules" ] && command -v git >/dev/null 2>&1; then
         log_info "Initializing git submodules for native plugins..."
         git -C "$OPENPLC_DIR" submodule update --init --recursive
+    elif [ -f "$OPENPLC_DIR/.gitmodules" ]; then
+        log_info "Git not found or skipping submodules as they are already populated."
     fi
 
     # Find directories with CMakeLists.txt (indicates buildable plugin)
@@ -571,8 +581,17 @@ chmod +x "$OPENPLC_DIR/install.sh" 2>/dev/null || true
 chmod +x "$OPENPLC_DIR/scripts/"* 2>/dev/null || true
 chmod +x "$OPENPLC_DIR/start_openplc.sh" 2>/dev/null || true
 
-install_dependencies
-python3 -m venv "$VENV_DIR"
+# Use specified Python or fallback to system python3
+PYTHON_BIN="${PYTHON_BIN:-python3}"
+log_info "Using Python: $($PYTHON_BIN --version)"
+
+if [ "${SKIP_DEPS:-0}" != "1" ]; then
+    install_dependencies
+else
+    log_info "Skipping system dependencies installation as requested."
+fi
+
+$PYTHON_BIN -m venv "$VENV_DIR"
 "$VENV_DIR/bin/python3" -m pip install --upgrade pip setuptools wheel
 "$VENV_DIR/bin/python3" -m pip install -r "$OPENPLC_DIR/requirements.txt"
 "$VENV_DIR/bin/python3" -m pip install -e .

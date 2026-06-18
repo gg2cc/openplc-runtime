@@ -47,12 +47,13 @@ log_error() {
 
 # Check if Python3 is available
 check_python() {
-    if ! command -v python3 &> /dev/null; then
-        log_error "python3 is not installed or not in PATH"
+    PYTHON_BIN="${PYTHON_BIN:-python3}"
+    if ! command -v "$PYTHON_BIN" &> /dev/null; then
+        log_error "$PYTHON_BIN is not installed or not in PATH"
         exit 1
     fi
     
-    local python_version=$(python3 --version | cut -d' ' -f2)
+    local python_version=$("$PYTHON_BIN" --version | cut -d' ' -f2)
     log_info "Using Python version: $python_version"
 }
 
@@ -93,11 +94,12 @@ create_plugin_venv() {
     # On MSYS2/Cygwin, use --system-site-packages to access pre-built packages like
     # cryptography that cannot be built from source on Windows
     log_info "Creating Python virtual environment at: $venv_path"
+    PYTHON_BIN="${PYTHON_BIN:-python3}"
     if is_msys2; then
         log_info "MSYS2 detected: using --system-site-packages for pre-built package access"
-        python3 -m venv --system-site-packages "$venv_path"
+        "$PYTHON_BIN" -m venv --system-site-packages "$venv_path"
     else
-        python3 -m venv "$venv_path"
+        "$PYTHON_BIN" -m venv "$venv_path"
     fi
     
     # Upgrade pip
