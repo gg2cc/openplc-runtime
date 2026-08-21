@@ -29,6 +29,54 @@ docker run -d \
   ghcr.io/autonomy-logic/openplc-runtime:latest
 ```
 
+```bash
+cd /home/ld/OpenPLC/openplc-runtime
+docker run --privileged --rm tonistiigi/binfmt --install all
+docker buildx create --use --name openplc-builder
+docker buildx inspect --bootstrap
+# 切换到 default builder (不记得是否放到这个地方执行)
+docker buildx use default
+# 编译并构建镜像
+docker buildx build --platform linux/arm64 -t openplc-runtime:aarch64 --load .
+docker save openplc-runtime:aarch64 | gzip > openplc-runtime-aarch64.tar.gz
+scp openplc-runtime-aarch64.tar.gz root@192.168.1.173:/userdata/
+# 目标机运行
+docker load -i /userdata/openplc-runtime-aarch64.tar.gz
+# 目标机运行
+docker run -d \
+  --name openplc-runtime \
+  -p 8443:8443 \
+  --cap-add=SYS_NICE \
+  --cap-add=SYS_RESOURCE \
+  -v openplc-runtime-data:/var/run/runtime \
+  --restart unless-stopped \
+  openplc-runtime:aarch64
+
+rm /userdata/openplc-runtime-aarch64.tar.gz # 删除压缩文件
+
+docker ps # 查看容器运行状态
+docker logs -f openplc-runtime # 查看运行日志
+docker stop openplc-runtime   # 停止
+docker start openplc-runtime  # 启动
+
+# 停止容器（如果已存在）
+docker stop openplc-runtime
+# 删除容器
+docker rm openplc-runtime
+
+# 查看所有镜像
+docker images
+# 查看所有卷
+docker volume ls
+# 彻底删除
+docker rmi openplc-runtime:aarch64
+docker volume rm openplc-runtime-data
+
+# 或者  清理所有未使用的资源 需要确认 Y
+docker system prune -a --volumes
+```
+
+
 The runtime will start and listen on port 8443 for connections from the OpenPLC Editor. **Do not open https://localhost:8443 in a browser** - there is no web interface there as there was on the v3 runtime. Instead, open the OpenPLC Editor desktop application and configure the runtime IP address and credentials to connect.
 
 **Prebuilt Binaries:** amd64, arm64, armv7
