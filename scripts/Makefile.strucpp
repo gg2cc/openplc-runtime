@@ -76,7 +76,6 @@ CC     := $(if $(CCACHE),$(CCACHE) gcc,gcc)
 CXXFLAGS := -std=c++17 -O1 -pipe -fPIC -Wall -Wextra -fstack-protector-strong -D_FORTIFY_SOURCE=2 \
             -Wformat -Werror=format-security -DSTRUCPP_THREADED -fno-gnu-unique -MMD -MP \
             -Wno-unknown-pragmas -Wno-deprecated-declarations -Wno-ignored-qualifiers \
-            -Wno-unused-parameter -Wno-unused-result \
             -I $(GENERATED_DIR) -I $(RUNTIME_INC) -I $(PYTHON_INC)
 
 # Python POU stubs (`{external …}` blocks emitted by the editor) call
