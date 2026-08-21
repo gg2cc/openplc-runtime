@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1
-
 FROM debian:bookworm-slim
 
 # Runtime version baked in at build time (mirrors strucpp + editor —
