@@ -102,6 +102,14 @@ has_systemd_support() {
 install_systemd_service() {
     local service_file="/etc/systemd/system/openplc-runtime.service"
 
+    if [ -f "$service_file" ]; then
+        log_info "OpenPLC Runtime systemd service already installed, restarting..."
+        # Make sure it's started and enabled anyway
+        systemctl enable "$service_file" >/dev/null 2>&1 || true
+        systemctl restart openplc-runtime.service >/dev/null 2>&1 || true
+        return 0
+    fi
+
     log_info "Installing OpenPLC Runtime systemd service..."
 
     # Create the service file
@@ -456,9 +464,11 @@ build_native_plugins() {
     mkdir -p "$plugins_output_dir"
 
     # Initialize git submodules (needed by plugins that vendor libraries like SOEM)
-    if [ -f "$OPENPLC_DIR/.gitmodules" ]; then
+    if [ -f "$OPENPLC_DIR/.gitmodules" ] && command -v git >/dev/null 2>&1; then
         log_info "Initializing git submodules for native plugins..."
         git -C "$OPENPLC_DIR" submodule update --init --recursive
+    elif [ -f "$OPENPLC_DIR/.gitmodules" ]; then
+        log_info "Git not found or skipping submodules as they are already populated."
     fi
 
     # Find directories with CMakeLists.txt (indicates buildable plugin)

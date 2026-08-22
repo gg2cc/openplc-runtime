@@ -39,6 +39,10 @@ docker buildx inspect --bootstrap
 docker buildx use default
 # 编译并构建镜像
 docker buildx build --platform linux/arm64 -t openplc-runtime:aarch64 --load .
+
+# 进入容器内部查看
+docker run --rm -it openplc-runtime:aarch64 bash
+
 docker save openplc-runtime:aarch64 | gzip > openplc-runtime-aarch64.tar.gz
 scp openplc-runtime-aarch64.tar.gz root@192.168.1.173:/userdata/
 # 目标机运行
