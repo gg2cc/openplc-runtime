@@ -200,9 +200,9 @@ int init(void *args)
             plugin_logger_error(&g_logger, "Failed to open value for input pin %d", g_inputs[i].pin);
             return -1;
         }
-        plugin_logger_info(&g_logger, "Input  pin %d -> %%IX%d.%d (active_low=%d) ready",
-                           g_inputs[i].pin, g_inputs[i].byte_idx, g_inputs[i].bit_idx, g_inputs[i].active_low);
     }
+    plugin_logger_info(&g_logger, "16 Digital Inputs (GPIO %d..%d) -> %%IX0.0..%%IX1.7 ready",
+                       g_inputs[0].pin, g_inputs[NUM_INPUTS - 1].pin);
 
     /* Initialize 16 Digital Outputs */
     for (i = 0; i < NUM_OUTPUTS; i++) {
@@ -226,9 +226,9 @@ int init(void *args)
         if (write(g_outputs[i].fd, &init_val, 1) < 0) {
             plugin_logger_warn(&g_logger, "init: write initial state failed for pin %d: %s", g_outputs[i].pin, strerror(errno));
         }
-        plugin_logger_info(&g_logger, "Output pin %d -> %%QX%d.%d (active_low=%d) ready",
-                           g_outputs[i].pin, g_outputs[i].byte_idx, g_outputs[i].bit_idx, g_outputs[i].active_low);
     }
+    plugin_logger_info(&g_logger, "16 Digital Outputs (GPIO %d..%d) -> %%QX0.0..%%QX1.7 ready",
+                       g_outputs[0].pin, g_outputs[NUM_OUTPUTS - 1].pin);
 
     /* Initialize Buzzer Output */
     g_buzzer.fd = -1;
