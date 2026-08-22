@@ -1,7 +1,7 @@
 /**
- * @file epc_tl3562_io.c
+ * @file huiz_3562_io.c
  *
- * @brief EPC_TL3562 GPIO I/O Mapping Plugin for OpenPLC
+ * @brief HUIZ_3562 GPIO I/O Mapping Plugin for OpenPLC
  *
  * Maps SBC3562 hardware GPIO pins (via sysfs) to OpenPLC I/O buffers based on XML device descriptions:
  *
@@ -170,8 +170,8 @@ static int gpio_open_value(int pin, int flags)
 /* Initialize I/O */
 int init(void *args)
 {
-    plugin_logger_init(&g_logger, "EPC_TL3562_IO", NULL);
-    plugin_logger_info(&g_logger, "Initializing EPC_TL3562 GPIO I/O mapping plugin...");
+    plugin_logger_init(&g_logger, "HUIZ_AMR_IO", NULL);
+    plugin_logger_info(&g_logger, "Initializing HUIZ_3562 GPIO I/O mapping plugin...");
 
     if (!args) {
         plugin_logger_error(&g_logger, "init: args is NULL");
@@ -179,7 +179,7 @@ int init(void *args)
     }
 
     memcpy(&g_args, args, sizeof(plugin_runtime_args_t));
-    plugin_logger_init(&g_logger, "EPC_TL3562_IO", args);
+    plugin_logger_init(&g_logger, "HUIZ_AMR_IO", args);
 
     int i;
 
@@ -272,7 +272,7 @@ int init(void *args)
     }
 
     plugin_initialized = 1;
-    plugin_logger_info(&g_logger, "EPC_TL3562_IO GPIO plugin initialized successfully");
+    plugin_logger_info(&g_logger, "HUIZ_AMR_IO GPIO plugin initialized successfully");
     return 0;
 }
 
@@ -283,14 +283,14 @@ int start_loop(void)
         return -1;
     }
     plugin_running = 1;
-    plugin_logger_info(&g_logger, "EPC_TL3562_IO GPIO plugin loop started");
+    plugin_logger_info(&g_logger, "HUIZ_AMR_IO GPIO plugin loop started");
     return 0;
 }
 
 void stop_loop(void)
 {
     plugin_running = 0;
-    plugin_logger_info(&g_logger, "EPC_TL3562_IO GPIO plugin loop stopped");
+    plugin_logger_info(&g_logger, "HUIZ_AMR_IO GPIO plugin loop stopped");
 }
 
 /**
@@ -407,7 +407,7 @@ void cycle_end(void)
 /* cleanup: Release all GPIO resources */
 void cleanup(void)
 {
-    plugin_logger_info(&g_logger, "Cleaning up EPC_TL3562_IO GPIO plugin...");
+    plugin_logger_info(&g_logger, "Cleaning up HUIZ_AMR_IO GPIO plugin...");
 
     int i;
     for (i = 0; i < NUM_OUTPUTS; i++) {
@@ -454,5 +454,5 @@ void cleanup(void)
 
     plugin_initialized = 0;
     plugin_running     = 0;
-    plugin_logger_info(&g_logger, "EPC_TL3562_IO GPIO plugin cleanup done");
+    plugin_logger_info(&g_logger, "HUIZ_AMR_IO GPIO plugin cleanup done");
 }

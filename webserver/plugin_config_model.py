@@ -309,11 +309,11 @@ class PluginsConfiguration:
         
         
         if not os.path.exists(config_dir):
-            return 0, [f"Configuration directory does not exist: {config_dir}"]
-        
-        # Get available config files
-        config_files = glob.glob(os.path.join(config_dir, "*.json"))
-        available_configs = {os.path.splitext(os.path.basename(f))[0]: f for f in config_files}
+            available_configs = {}
+        else:
+            # Get available config files
+            config_files = glob.glob(os.path.join(config_dir, "*.json"))
+            available_configs = {os.path.splitext(os.path.basename(f))[0]: f for f in config_files}
         
         updates = []
         plugins_updated = 0
@@ -366,11 +366,12 @@ class PluginsConfiguration:
                     plugins_updated += 1
                     updates.append(f"Enabled plugin '{plugin.name}' with config: {plugin.config_path}")
             else:
-                # Disable plugin if no config file found
-                if old_enabled:
+                # Disable plugin if no config file found AND plugin relies on a config file
+                # Plugins without a config file (config_path is empty) do not depend on config_dir JSON files
+                if old_enabled and old_config_path:
                     plugin.enabled = False
                     plugins_updated += 1
-                    updates.append(f"Disabled plugin '{plugin.name}' (no config file found)")
+                    updates.append(f"Disabled plugin '{plugin.name}' (no config file found in {config_dir})")
 
         return plugins_updated, updates
 

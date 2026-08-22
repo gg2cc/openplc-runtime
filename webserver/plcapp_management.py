@@ -178,41 +178,24 @@ def update_plugin_configurations(generated_dir: str = "core/generated"):
     for plugin in plugins_config.plugins:
         build_state.log(f"[DEBUG] Initial state - {plugin.name}: enabled={plugin.enabled}, config_path='{plugin.config_path}'\n")
 
-    # Check if conf directory exists
-    if not os.path.exists(conf_dir):
-        build_state.log(f"[INFO] No conf directory found in {generated_dir}, disabling all plugins\n")
-        # When there's no conf directory, disable all currently enabled plugins
-        plugins_updated = 0
-        update_messages = []
-        for plugin in plugins_config.plugins:
-            if plugin.enabled:
-                plugin.enabled = False
-                plugins_updated += 1
-                update_messages.append(f"Disabled plugin '{plugin.name}' (no conf directory found)")
-        
-        # Log the updates
-        build_state.log(f"[INFO] Found 0 config files (no conf directory): []\n")
-        
-        for message in update_messages:
-            build_state.log(f"[INFO] {message}\n")
-    else:
-        # Process config files normally when conf directory exists
-        # Use the utility method to update plugins based on available config files
-        # Copy config files to plugin directories instead of referencing them directly
-        plugins_updated, update_messages = plugins_config.update_plugins_from_config_dir(conf_dir, copy_to_plugin_dirs=True)
-        
-        # Log the updates
+    # Process config files via update_plugins_from_config_dir
+    # Note: Plugins without a config file (config_path is empty) will not be disabled automatically.
+    plugins_updated, update_messages = plugins_config.update_plugins_from_config_dir(conf_dir, copy_to_plugin_dirs=True)
+
+    if os.path.exists(conf_dir):
         config_files = glob.glob(os.path.join(conf_dir, "*.json"))
         available_configs = {os.path.splitext(os.path.basename(f))[0]: f for f in config_files}
         build_state.log(f"[INFO] Found {len(available_configs)} config files in {conf_dir}: {list(available_configs.keys())}\n")
-        
-        for message in update_messages:
-            if "Copied config file" in message:
-                build_state.log(f"[INFO] {message}\n")
-            elif "Enabled plugin" in message or "Disabled plugin" in message:
-                build_state.log(f"[INFO] {message}\n")
-            else:
-                build_state.log(f"[WARNING] {message}\n")
+    else:
+        build_state.log(f"[INFO] Found 0 config files (no conf directory in {generated_dir})\n")
+
+    for message in update_messages:
+        if "Copied config file" in message:
+            build_state.log(f"[INFO] {message}\n")
+        elif "Enabled plugin" in message or "Disabled plugin" in message:
+            build_state.log(f"[INFO] {message}\n")
+        else:
+            build_state.log(f"[WARNING] {message}\n")
 
     # VPP plugins are handled separately via vpp_plugins.conf — see
     # apply_vpp_plugin_conf(). Nothing to do here for VPP.
