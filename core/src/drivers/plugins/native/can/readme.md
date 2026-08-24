@@ -194,8 +194,6 @@ Created memory file
     "sjw": 1,
     "sample_point": 0.875,
     "restart_ms": 100,
-    "listen_only": false,
-    "loopback": false,
     "auto_bringup": true
   },
   "rx_frames": [

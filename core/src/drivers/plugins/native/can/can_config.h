@@ -68,8 +68,6 @@ typedef struct
     uint32_t sjw;
     double sample_point;
     uint32_t restart_ms;
-    bool listen_only;
-    bool loopback;
     bool triple_sampling;
     bool auto_bringup;
 } can_hardware_config_t;

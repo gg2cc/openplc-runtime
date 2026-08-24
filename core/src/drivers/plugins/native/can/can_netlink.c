@@ -202,22 +202,11 @@ int can_netlink_configure_and_up(const can_hardware_config_t *hw, plugin_logger_
                 add_attr(&req.nh, sizeof(req), IFLA_CAN_RESTART_MS, &restart_ms, sizeof(restart_ms));
             }
 
-            /* Control Mode Flags */
-            struct can_ctrlmode cm;
-            memset(&cm, 0, sizeof(cm));
-            if (hw->loopback) {
-                cm.mask |= CAN_CTRLMODE_LOOPBACK;
-                cm.flags |= CAN_CTRLMODE_LOOPBACK;
-            }
-            if (hw->listen_only) {
-                cm.mask |= CAN_CTRLMODE_LISTENONLY;
-                cm.flags |= CAN_CTRLMODE_LISTENONLY;
-            }
             if (hw->triple_sampling) {
+                struct can_ctrlmode cm;
+                memset(&cm, 0, sizeof(cm));
                 cm.mask |= CAN_CTRLMODE_3SAMPLES;
                 cm.flags |= CAN_CTRLMODE_3SAMPLES;
-            }
-            if (cm.mask != 0) {
                 add_attr(&req.nh, sizeof(req), IFLA_CAN_CTRLMODE, &cm, sizeof(cm));
             }
 

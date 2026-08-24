@@ -42,8 +42,6 @@ void can_config_init_defaults(can_config_t *config)
     config->hardware.sjw = 1;
     config->hardware.sample_point = 0.875;
     config->hardware.restart_ms = 100;
-    config->hardware.listen_only = false;
-    config->hardware.loopback = false;
     config->hardware.triple_sampling = false;
     config->hardware.auto_bringup = true;
 }
@@ -75,16 +73,6 @@ static int parse_hardware(cJSON *hw_item, can_hardware_config_t *hw, plugin_logg
     cJSON *restart = cJSON_GetObjectItem(hw_item, "restart_ms");
     if (cJSON_IsNumber(restart) && restart->valueint >= 0) {
         hw->restart_ms = (uint32_t)restart->valueint;
-    }
-
-    cJSON *listen_only = cJSON_GetObjectItem(hw_item, "listen_only");
-    if (cJSON_IsBool(listen_only)) {
-        hw->listen_only = cJSON_IsTrue(listen_only);
-    }
-
-    cJSON *loopback = cJSON_GetObjectItem(hw_item, "loopback");
-    if (cJSON_IsBool(loopback)) {
-        hw->loopback = cJSON_IsTrue(loopback);
     }
 
     cJSON *triple_sampling = cJSON_GetObjectItem(hw_item, "triple_sampling");
