@@ -137,16 +137,37 @@ int init(void *args)
 
     plugin_logger_info(&g_logger, "Initializing CAN Plugin...");
 
-    /* Parse configuration */
+    /* Parse configuration. If no editor-side CAN config is provided,
+     * do not auto-init the interface; the plugin remains inactive. */
     const char *cfg_path = g_args.plugin_specific_config_file_path;
     if (!cfg_path || !cfg_path[0]) {
-        cfg_path = "./core/src/drivers/plugins/native/can/can.json";
+        plugin_logger_info(&g_logger, "No CAN config provided; skipping CAN initialization");
+        return 0;
+    }
+
+    if (access(cfg_path, F_OK) != 0) {
+        plugin_logger_info(&g_logger, "CAN config file %s not found; skipping CAN initialization",
+                           cfg_path);
+        return 0;
     }
 
     if (can_config_parse(cfg_path, &g_config, &g_logger) != 0) {
         plugin_logger_error(&g_logger, "Failed to parse CAN configuration file");
         return -1;
     }
+
+    plugin_logger_info(&g_logger, "CAN Plugin initialized successfully");
+    return 0;
+}
+
+int start_loop(void)
+{
+    if (!g_config.hardware.interface[0]) {
+        plugin_logger_info(&g_logger, "No CAN interface configured; skipping CAN start");
+        return 0;
+    }
+
+    plugin_logger_info(&g_logger, "Starting CAN Plugin...");
 
     /* Configure Netlink hardware bit timing, SJW, auto restart & link up */
     can_netlink_configure_and_up(&g_config.hardware, &g_logger);
@@ -157,14 +178,6 @@ int init(void *args)
         plugin_logger_warn(&g_logger, "Could not open SocketCAN device %s; plugin running in degraded mode",
                            g_config.hardware.interface);
     }
-
-    plugin_logger_info(&g_logger, "CAN Plugin initialized successfully");
-    return 0;
-}
-
-int start_loop(void)
-{
-    plugin_logger_info(&g_logger, "Starting CAN Plugin RX thread...");
 
     if (!g_rx_running) {
         g_rx_running = true;
@@ -279,17 +292,17 @@ void stop_loop(void)
         g_rx_running = false;
         pthread_join(g_rx_thread, NULL);
     }
+
+    if (g_can_fd >= 0) {
+        can_socket_close(g_can_fd);
+        g_can_fd = -1;
+    }
 }
 
 void cleanup(void)
 {
     plugin_logger_info(&g_logger, "Cleaning up CAN Plugin...");
     stop_loop();
-
-    if (g_can_fd >= 0) {
-        can_socket_close(g_can_fd);
-        g_can_fd = -1;
-    }
 
     can_config_free(&g_config);
 }

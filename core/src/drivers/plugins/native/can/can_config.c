@@ -85,9 +85,10 @@ static int parse_hardware(cJSON *hw_item, can_hardware_config_t *hw, plugin_logg
         hw->auto_bringup = cJSON_IsTrue(auto_bringup);
     }
 
-    plugin_logger_info(logger, "Hardware Config: iface=%s, bitrate=%u, sjw=%u, sample_point=%.3f, restart_ms=%u, auto_bringup=%s",
+    plugin_logger_info(logger, "Hardware Config: iface=%s, bitrate=%u, sjw=%u, sample_point=%.3f, restart_ms=%u, auto_bringup=%s, triple_sampling=%s",
                        hw->interface, hw->bitrate, hw->sjw, hw->sample_point, hw->restart_ms,
-                       hw->auto_bringup ? "true" : "false");
+                       hw->auto_bringup ? "true" : "false",
+                       hw->triple_sampling ? "true" : "false");
     return 0;
 }
 
@@ -226,6 +227,9 @@ int can_config_parse(const char *json_path, can_config_t *config, plugin_logger_
     if (!f) {
         plugin_logger_warn(logger, "Config file not found: %s (using defaults)", json_path);
         return 0;
+    }
+    else {
+        plugin_logger_info(logger, "Parsing CAN config from: %s", json_path);
     }
 
     fseek(f, 0, SEEK_END);
