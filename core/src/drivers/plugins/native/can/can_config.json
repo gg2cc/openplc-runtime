@@ -1,0 +1,40 @@
+{
+  "hardware_config": {
+    "interface": "can0",
+    "bitrate": 500000,
+    "sjw": 1,
+    "sample_point": 0.875,
+    "restart_ms": 100,
+    "listen_only": false,
+    "loopback": false,
+    "triple_sampling": false,
+    "auto_bringup": true
+  },
+  "rx_frames": [
+    {
+      "can_id": "0x123",
+      "eff": false,
+      "rtr": false,
+      "dlc": 8,
+      "mappings": [
+        { "byte_offset": 0, "iec_type": "BYTE_INPUT", "iec_index": 0 },
+        { "byte_offset": 1, "iec_type": "BYTE_INPUT", "iec_index": 1 },
+        { "byte_offset": 2, "iec_type": "INT_INPUT",  "iec_index": 0 }
+      ]
+    }
+  ],
+  "tx_frames": [
+    {
+      "can_id": "0x456",
+      "eff": false,
+      "dlc": 8,
+      "trigger": "cyclic",
+      "cycle_time_ms": 10,
+      "mappings": [
+        { "byte_offset": 0, "iec_type": "BYTE_OUTPUT", "iec_index": 0 },
+        { "byte_offset": 1, "iec_type": "BYTE_OUTPUT", "iec_index": 1 },
+        { "byte_offset": 2, "iec_type": "INT_OUTPUT",  "iec_index": 0 }
+      ]
+    }
+  ]
+}
