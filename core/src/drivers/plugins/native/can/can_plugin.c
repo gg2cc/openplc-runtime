@@ -140,7 +140,7 @@ int init(void *args)
     /* Parse configuration */
     const char *cfg_path = g_args.plugin_specific_config_file_path;
     if (!cfg_path || !cfg_path[0]) {
-        cfg_path = "./core/src/drivers/plugins/native/can/can_config.json";
+        cfg_path = "./core/src/drivers/plugins/native/can/can.json";
     }
 
     if (can_config_parse(cfg_path, &g_config, &g_logger) != 0) {
@@ -298,9 +298,19 @@ int get_stats(char *out, size_t out_size)
 {
     if (!out || out_size == 0) return -1;
 
+    const char *iface = (g_config.hardware.interface && g_config.hardware.interface[0]) 
+                        ? g_config.hardware.interface : "can0";
+
     snprintf(out, out_size,
-             "{\"interface\":\"%s\",\"rx_count\":%llu,\"tx_count\":%llu,\"rx_errors\":%llu,\"tx_errors\":%llu}",
-             g_config.hardware.interface,
+             "{\"label\":\"CAN Bus (%s)\",\"fields\":["
+             "{\"label\":\"Interface\",\"value\":\"%s\"},"
+             "{\"label\":\"RX Frames\",\"value\":%llu},"
+             "{\"label\":\"TX Frames\",\"value\":%llu},"
+             "{\"label\":\"RX Errors\",\"value\":%llu},"
+             "{\"label\":\"TX Errors\",\"value\":%llu}"
+             "]}",
+             iface,
+             iface,
              (unsigned long long)g_rx_count,
              (unsigned long long)g_tx_count,
              (unsigned long long)g_rx_errors,

@@ -86,7 +86,7 @@ SocketCAN 已经被 Linux 内核抽象为标准网络接口（如 `can0`），�
 ```
 +------------------+         JSON 配置        +-----------------------------------------+
 |   Editor 端      | -----------------------> | OpenPLC Runtime (can_plugin.so)         |
-| (界面设置 CAN    | (can_config.json)        |                                         |
+| (界面设置 CAN    | (can.json)        |                                         |
 | 参数 & 报文映射) |                          |  1. cJSON 解析配置                        |
 +------------------+                          |  2. 创建 SocketCAN (can0 fd)             |
                                               |                                         |
@@ -106,7 +106,7 @@ SocketCAN 已经被 Linux 内核抽象为标准网络接口（如 `can0`），�
 
 ### Steps
 
-1. **约定 Editor 端与 Runtime 简易接口配置文件格式 (`can_config.json`)**
+1. **约定 Editor 端与 Runtime 简易接口配置文件格式 (`can.json`)**
    - 基础配置：CAN 接口名称（如 `"can0"`）、波特率（如 `500000`）。
    - RX 接收报文规则：CAN ID、扩展帧标志、DLC、匹配后写入的 OpenPLC 输入地址类型和偏移（如映射至 `%IB0` `BYTE_INPUT` 或 `%IW1` `INT_INPUT`）。
    - TX 发送报文规则：CAN ID、扩展帧标志、DLC、发送触发机制（周期/变化），以及读取的 OpenPLC 输出地址类型和偏移（如映射自 `%QB0` `BYTE_OUTPUT`）。
@@ -184,7 +184,7 @@ Created memory file
 
 在 RK3562 Linux Ubuntu 20.04 目标机上，以 OpenPLC Runtime v4 Native (C/C++) 插件架构为基础，使用 Linux 标准 SocketCAN (`AF_CAN`/`SOCK_RAW`) 接口实现极简且高性能的 CAN 总线驱动集成。Editor 端输出包含详细 CAN 位定时与硬件重置参数的 JSON 配置文件，Runtime 端通过 Netlink/SocketCAN 自动配置 `can0` 接口并进行报文收发，与 OpenPLC 无锁 Journal 队列及图像表 (%I/%Q) 映射。
 
-### 详细 JSON 结构设计范例 (`can_config.json`)
+### 详细 JSON 结构设计范例 (`can.json`)
 
 ```json
 {
@@ -228,7 +228,7 @@ Created memory file
 
 ### Steps
 
-1. **扩展 Editor 与 Runtime 对接的 JSON 配置规范** (`can_config.json`)
+1. **扩展 Editor 与 Runtime 对接的 JSON 配置规范** (`can.json`)
    - **硬件及位定时参数 (`hardware_config`)**：
      - `interface`: 接口名称（如 `"can0"`）
      - `bitrate`: 波特率（如 `500000`）
@@ -256,7 +256,7 @@ Created memory file
 3. **核心逻辑实现（C/C++）**
    - **`init(void *args)`**：
      - 深拷贝 `plugin_runtime_args_t`，初始化插件日志。
-     - 解析 `can_config.json`，读取位定时与报文映射。
+     - 解析 `can.json`，读取位定时与报文映射。
      - 若启用 `auto_bringup`，通过 Netlink API 先将 `can0` Down 掉，设置 `bitrate`、`sjw`、`sample_point`、`restart-ms` 等硬件参数，再将其 Up 起来。
      - 创建并绑定 SocketCAN 套接字（`AF_CAN`）。
    - **`start_loop()` & 独立 RX 线程**：
@@ -406,7 +406,7 @@ Created []()
 原生 CAN 插件代码存放在 `can` 目录下：
 
 1. `can_config.h` & `can_config.c`
-   - 基于 `cJSON` 解析来自 Editor 的配置文件 `can_config.json`。
+   - 基于 `cJSON` 解析来自 Editor 的配置文件 `can.json`。
    - 解析详细的 CAN 硬件配置（波特率、SJW、采样点率、Bus-Off 自动重启时间 `restart_ms`、`loopback`、`auto_bringup`）以及 RX/TX 报文的 IEC 映射表（`%IB`、`%IW`、`%ID`、`%QB` 等）。
 
 2. `can_netlink.h` & `can_netlink.c`
@@ -422,7 +422,7 @@ Created []()
    - **输入数据 (RX)**：接收线程通过 SocketCAN 读取报文后，使用 OpenPLC **无锁 Journal 队列**（如 `journal_write_byte`）写入到输入图像表 (`%I`)，绝无竞争锁开销。
    - **输出数据 (TX)**：在 `cycle_end()` 周期末尾，按设定读取 PLC 输出变量 (`%Q`)，构造 CAN 报文发送至物理总线。支持 **周期发送 (Cyclic)** 与 **按需变化发送 (On-Change)** 触发。
 
-5. `can_config.json`
+5. `can.json`
    - 默认配置文件范例，供 Editor 导出时参考。
 
 6. `CMakeLists.txt`
@@ -433,7 +433,7 @@ Created []()
 
 ---
 
-### 二、配置文件示例 (`can_config.json`)
+### 二、配置文件示例 (`can.json`)
 
 Editor 端只需在配置导出时生成如下结构的 JSON 即可完成参数设置与变量映射：
 
