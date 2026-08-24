@@ -18,6 +18,7 @@ extern "C" {
 
 #define MAX_CAN_IFNAME_LEN 32
 #define MAX_CAN_MAPPINGS_PER_FRAME 16
+#define MAX_CAN_INTERFACES 8
 
 typedef enum
 {
@@ -79,6 +80,12 @@ typedef struct
     can_rx_frame_config_t *rx_frames;
     int tx_frame_count;
     can_tx_frame_config_t *tx_frames;
+} can_interface_config_t;
+
+typedef struct
+{
+    int interface_count;
+    can_interface_config_t *interfaces;
 } can_config_t;
 
 /**

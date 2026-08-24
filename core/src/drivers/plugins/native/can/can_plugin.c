@@ -21,7 +21,8 @@
 static plugin_runtime_args_t g_args;
 static plugin_logger_t g_logger;
 static can_config_t g_config;
-static int g_can_fd = -1;
+static int g_can_fds[MAX_CAN_INTERFACES];
+static int g_can_fd_count = 0;
 
 static pthread_t g_rx_thread;
 static volatile bool g_rx_running = false;
@@ -51,71 +52,77 @@ static void *can_rx_thread_proc(void *arg)
     uint8_t payload[8];
 
     while (g_rx_running) {
-        if (g_can_fd < 0) {
-            usleep(100000);
-            continue;
-        }
-
-        int res = can_socket_read(g_can_fd, &can_id, &eff, &rtr, &dlc, payload);
-        if (res < 0) {
-            /* Timeout or temporary read error */
-            continue;
-        }
-
-        g_rx_count++;
-
-        /* Match against configured RX frames */
-        for (int i = 0; i < g_config.rx_frame_count; i++) {
-            can_rx_frame_config_t *frame = &g_config.rx_frames[i];
-            if (frame->can_id == can_id && frame->eff == eff) {
-                /* Apply mappings */
-                for (int j = 0; j < frame->mapping_count; j++) {
-                    can_mapping_t *m = &frame->mappings[j];
-                    if (m->byte_offset >= dlc) continue;
-
-                    switch (m->iec_type) {
-                        case 0: { /* BOOL_INPUT */
-                            int bit_val = (payload[m->byte_offset] >> m->iec_bit) & 0x01;
-                            if (g_args.journal_write_bool) {
-                                g_args.journal_write_bool(0, m->iec_index, m->iec_bit, bit_val);
-                            }
-                            break;
-                        }
-                        case 3: { /* BYTE_INPUT */
-                            uint8_t val = payload[m->byte_offset];
-                            if (g_args.journal_write_byte) {
-                                g_args.journal_write_byte(3, m->iec_index, val);
-                            }
-                            break;
-                        }
-                        case 5: { /* INT_INPUT */
-                            if (m->byte_offset + 1 < dlc) {
-                                uint16_t val = (uint16_t)payload[m->byte_offset] |
-                                              ((uint16_t)payload[m->byte_offset + 1] << 8);
-                                if (g_args.journal_write_int) {
-                                    g_args.journal_write_int(5, m->iec_index, (int)val);
-                                }
-                            }
-                            break;
-                        }
-                        case 8: { /* DINT_INPUT */
-                            if (m->byte_offset + 3 < dlc) {
-                                uint32_t val = (uint32_t)payload[m->byte_offset] |
-                                              ((uint32_t)payload[m->byte_offset + 1] << 8) |
-                                              ((uint32_t)payload[m->byte_offset + 2] << 16) |
-                                              ((uint32_t)payload[m->byte_offset + 3] << 24);
-                                if (g_args.journal_write_dint) {
-                                    g_args.journal_write_dint(8, m->iec_index, val);
-                                }
-                            }
-                            break;
-                        }
-                        default:
-                            break;
-                    }
-                }
-                break; /* Frame matched */
+        bool any_fd_open = false;
+        for (int iface_idx = 0; iface_idx < g_can_fd_count; iface_idx++) {
+            int fd = g_can_fds[iface_idx];
+            if (fd < 0) {
+                continue;
             }
+            any_fd_open = true;
+
+            int res = can_socket_read(fd, &can_id, &eff, &rtr, &dlc, payload);
+            if (res < 0) {
+                continue;
+            }
+
+            g_rx_count++;
+
+            can_interface_config_t *iface = &g_config.interfaces[iface_idx];
+            for (int i = 0; i < iface->rx_frame_count; i++) {
+                can_rx_frame_config_t *frame = &iface->rx_frames[i];
+                if (frame->can_id == can_id && frame->eff == eff) {
+                    for (int j = 0; j < frame->mapping_count; j++) {
+                        can_mapping_t *m = &frame->mappings[j];
+                        if (m->byte_offset >= dlc) continue;
+
+                        switch (m->iec_type) {
+                            case 0: { /* BOOL_INPUT */
+                                int bit_val = (payload[m->byte_offset] >> m->iec_bit) & 0x01;
+                                if (g_args.journal_write_bool) {
+                                    g_args.journal_write_bool(0, m->iec_index, m->iec_bit, bit_val);
+                                }
+                                break;
+                            }
+                            case 3: { /* BYTE_INPUT */
+                                uint8_t val = payload[m->byte_offset];
+                                if (g_args.journal_write_byte) {
+                                    g_args.journal_write_byte(3, m->iec_index, val);
+                                }
+                                break;
+                            }
+                            case 5: { /* INT_INPUT */
+                                if (m->byte_offset + 1 < dlc) {
+                                    uint16_t val = (uint16_t)payload[m->byte_offset] |
+                                                  ((uint16_t)payload[m->byte_offset + 1] << 8);
+                                    if (g_args.journal_write_int) {
+                                        g_args.journal_write_int(5, m->iec_index, (int)val);
+                                    }
+                                }
+                                break;
+                            }
+                            case 8: { /* DINT_INPUT */
+                                if (m->byte_offset + 3 < dlc) {
+                                    uint32_t val = (uint32_t)payload[m->byte_offset] |
+                                                  ((uint32_t)payload[m->byte_offset + 1] << 8) |
+                                                  ((uint32_t)payload[m->byte_offset + 2] << 16) |
+                                                  ((uint32_t)payload[m->byte_offset + 3] << 24);
+                                    if (g_args.journal_write_dint) {
+                                        g_args.journal_write_dint(8, m->iec_index, val);
+                                    }
+                                }
+                                break;
+                            }
+                            default:
+                                break;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+
+        if (!any_fd_open) {
+            usleep(100000);
         }
     }
 
@@ -162,21 +169,37 @@ int init(void *args)
 
 int start_loop(void)
 {
-    if (!g_config.hardware.interface[0]) {
+    if (g_config.interface_count <= 0) {
         plugin_logger_info(&g_logger, "No CAN interface configured; skipping CAN start");
         return 0;
     }
 
-    plugin_logger_info(&g_logger, "Starting CAN Plugin...");
+    plugin_logger_info(&g_logger, "Starting CAN Plugin for %d interfaces...", g_config.interface_count);
 
-    /* Configure Netlink hardware bit timing, SJW, auto restart & link up */
-    can_netlink_configure_and_up(&g_config.hardware, &g_logger);
+    memset(g_can_fds, -1, sizeof(g_can_fds));
+    g_can_fd_count = 0;
 
-    /* Open SocketCAN raw socket */
-    g_can_fd = can_socket_open(g_config.hardware.interface, &g_logger);
-    if (g_can_fd < 0) {
-        plugin_logger_warn(&g_logger, "Could not open SocketCAN device %s; plugin running in degraded mode",
-                           g_config.hardware.interface);
+    for (int iface_idx = 0; iface_idx < g_config.interface_count; iface_idx++) {
+        can_interface_config_t *iface = &g_config.interfaces[iface_idx];
+        if (!iface->hardware.interface[0]) {
+            continue;
+        }
+
+        can_netlink_configure_and_up(&iface->hardware, &g_logger);
+
+        int fd = can_socket_open(iface->hardware.interface, &g_logger);
+        if (fd < 0) {
+            plugin_logger_warn(&g_logger, "Could not open SocketCAN device %s; plugin running in degraded mode",
+                               iface->hardware.interface);
+            continue;
+        }
+
+        g_can_fds[g_can_fd_count++] = fd;
+    }
+
+    if (g_can_fd_count == 0) {
+        plugin_logger_warn(&g_logger, "No CAN socket opened; plugin will remain idle");
+        return 0;
     }
 
     if (!g_rx_running) {
@@ -197,87 +220,90 @@ void cycle_start(void)
 
 void cycle_end(void)
 {
-    if (g_can_fd < 0 || g_config.tx_frame_count == 0) return;
+    if (g_can_fd_count == 0) return;
 
     uint64_t now_ms = get_time_ms();
 
-    /* Read output values under lock */
     if (g_args.image_lock) g_args.image_lock();
 
-    for (int i = 0; i < g_config.tx_frame_count; i++) {
-        can_tx_frame_config_t *frame = &g_config.tx_frames[i];
-        uint8_t payload[8] = {0};
+    for (int iface_idx = 0; iface_idx < g_config.interface_count; iface_idx++) {
+        can_interface_config_t *iface = &g_config.interfaces[iface_idx];
+        int fd = g_can_fds[iface_idx];
+        if (fd < 0 || iface->tx_frame_count == 0) continue;
 
-        /* Construct frame payload from output buffers */
-        for (int j = 0; j < frame->mapping_count; j++) {
-            can_mapping_t *m = &frame->mappings[j];
-            if (m->byte_offset >= 8) continue;
+        for (int i = 0; i < iface->tx_frame_count; i++) {
+            can_tx_frame_config_t *frame = &iface->tx_frames[i];
+            uint8_t payload[8] = {0};
 
-            switch (m->iec_type) {
-                case 1: { /* BOOL_OUTPUT */
-                    if (g_args.bool_output && m->iec_index < g_args.buffer_size) {
-                        IEC_BOOL val = *g_args.bool_output[m->iec_index][m->iec_bit];
-                        if (val) {
-                            payload[m->byte_offset] |= (1 << m->iec_bit);
-                        } else {
-                            payload[m->byte_offset] &= ~(1 << m->iec_bit);
+            for (int j = 0; j < frame->mapping_count; j++) {
+                can_mapping_t *m = &frame->mappings[j];
+                if (m->byte_offset >= 8) continue;
+
+                switch (m->iec_type) {
+                    case 1: { /* BOOL_OUTPUT */
+                        if (g_args.bool_output && m->iec_index < g_args.buffer_size) {
+                            IEC_BOOL val = *g_args.bool_output[m->iec_index][m->iec_bit];
+                            if (val) {
+                                payload[m->byte_offset] |= (1 << m->iec_bit);
+                            } else {
+                                payload[m->byte_offset] &= ~(1 << m->iec_bit);
+                            }
                         }
+                        break;
                     }
-                    break;
-                }
-                case 4: { /* BYTE_OUTPUT */
-                    if (g_args.byte_output && m->iec_index < g_args.buffer_size) {
-                        IEC_BYTE val = *g_args.byte_output[m->iec_index];
-                        payload[m->byte_offset] = val;
-                    }
-                    break;
-                }
-                case 6: { /* INT_OUTPUT */
-                    if (g_args.int_output && m->iec_index < g_args.buffer_size) {
-                        IEC_UINT val = *g_args.int_output[m->iec_index];
-                        payload[m->byte_offset] = val & 0xFF;
-                        if (m->byte_offset + 1 < 8) {
-                            payload[m->byte_offset + 1] = (val >> 8) & 0xFF;
+                    case 4: { /* BYTE_OUTPUT */
+                        if (g_args.byte_output && m->iec_index < g_args.buffer_size) {
+                            IEC_BYTE val = *g_args.byte_output[m->iec_index];
+                            payload[m->byte_offset] = val;
                         }
+                        break;
                     }
-                    break;
-                }
-                case 9: { /* DINT_OUTPUT */
-                    if (g_args.dint_output && m->iec_index < g_args.buffer_size) {
-                        IEC_UDINT val = *g_args.dint_output[m->iec_index];
-                        payload[m->byte_offset] = val & 0xFF;
-                        if (m->byte_offset + 1 < 8) payload[m->byte_offset + 1] = (val >> 8) & 0xFF;
-                        if (m->byte_offset + 2 < 8) payload[m->byte_offset + 2] = (val >> 16) & 0xFF;
-                        if (m->byte_offset + 3 < 8) payload[m->byte_offset + 3] = (val >> 24) & 0xFF;
+                    case 6: { /* INT_OUTPUT */
+                        if (g_args.int_output && m->iec_index < g_args.buffer_size) {
+                            IEC_UINT val = *g_args.int_output[m->iec_index];
+                            payload[m->byte_offset] = val & 0xFF;
+                            if (m->byte_offset + 1 < 8) {
+                                payload[m->byte_offset + 1] = (val >> 8) & 0xFF;
+                            }
+                        }
+                        break;
                     }
-                    break;
+                    case 9: { /* DINT_OUTPUT */
+                        if (g_args.dint_output && m->iec_index < g_args.buffer_size) {
+                            IEC_UDINT val = *g_args.dint_output[m->iec_index];
+                            payload[m->byte_offset] = val & 0xFF;
+                            if (m->byte_offset + 1 < 8) payload[m->byte_offset + 1] = (val >> 8) & 0xFF;
+                            if (m->byte_offset + 2 < 8) payload[m->byte_offset + 2] = (val >> 16) & 0xFF;
+                            if (m->byte_offset + 3 < 8) payload[m->byte_offset + 3] = (val >> 24) & 0xFF;
+                        }
+                        break;
+                    }
+                    default:
+                        break;
                 }
-                default:
-                    break;
             }
-        }
 
-        /* Check trigger condition */
-        bool should_send = false;
-        if (frame->trigger == CAN_TRIGGER_CYCLIC) {
-            if (!frame->has_sent_once || (now_ms - frame->last_send_time_ms >= frame->cycle_time_ms)) {
-                should_send = true;
+            bool should_send = false;
+            if (frame->trigger == CAN_TRIGGER_CYCLIC) {
+                if (!frame->has_sent_once || (now_ms - frame->last_send_time_ms >= frame->cycle_time_ms)) {
+                    should_send = true;
+                }
+            } else if (frame->trigger == CAN_TRIGGER_ON_CHANGE) {
+                if (!frame->has_sent_once || memcmp(payload, frame->prev_payload, frame->dlc) != 0) {
+                    should_send = true;
+                }
             }
-        } else if (frame->trigger == CAN_TRIGGER_ON_CHANGE) {
-            if (!frame->has_sent_once || memcmp(payload, frame->prev_payload, frame->dlc) != 0) {
-                should_send = true;
-            }
-        }
 
-        if (should_send) {
-            int ret = can_socket_write(g_can_fd, frame->can_id, frame->eff, false, frame->dlc, payload);
-            if (ret == 0) {
-                g_tx_count++;
-                frame->last_send_time_ms = now_ms;
-                memcpy(frame->prev_payload, payload, 8);
-                frame->has_sent_once = true;
-            } else {
-                g_tx_errors++;
+            if (should_send) {
+                int ret = can_socket_write(fd, frame->can_id, frame->eff, false, frame->dlc, payload);
+                if (ret == 0) {
+                    g_tx_count++;
+                    frame->last_send_time_ms = now_ms;
+                    memcpy(frame->prev_payload, payload, 8);
+                    frame->has_sent_once = true;
+                } else {
+                    g_tx_errors++;
+                }
             }
         }
     }
@@ -293,10 +319,13 @@ void stop_loop(void)
         pthread_join(g_rx_thread, NULL);
     }
 
-    if (g_can_fd >= 0) {
-        can_socket_close(g_can_fd);
-        g_can_fd = -1;
+    for (int i = 0; i < g_can_fd_count; i++) {
+        if (g_can_fds[i] >= 0) {
+            can_socket_close(g_can_fds[i]);
+            g_can_fds[i] = -1;
+        }
     }
+    g_can_fd_count = 0;
 }
 
 void cleanup(void)
@@ -311,8 +340,10 @@ int get_stats(char *out, size_t out_size)
 {
     if (!out || out_size == 0) return -1;
 
-    const char *iface = (g_config.hardware.interface && g_config.hardware.interface[0]) 
-                        ? g_config.hardware.interface : "can0";
+    const char *iface = "can0";
+    if (g_config.interface_count > 0 && g_config.interfaces[0].hardware.interface[0]) {
+        iface = g_config.interfaces[0].hardware.interface;
+    }
 
     snprintf(out, out_size,
              "{\"label\":\"CAN Bus (%s)\",\"fields\":["

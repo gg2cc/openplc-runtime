@@ -37,13 +37,21 @@ void can_config_init_defaults(can_config_t *config)
 {
     if (!config) return;
     memset(config, 0, sizeof(can_config_t));
-    snprintf(config->hardware.interface, sizeof(config->hardware.interface), "can0");
-    config->hardware.bitrate = 500000;
-    config->hardware.sjw = 1;
-    config->hardware.sample_point = 0.875;
-    config->hardware.restart_ms = 100;
-    config->hardware.triple_sampling = false;
-    config->hardware.auto_bringup = true;
+    config->interface_count = 0;
+    config->interfaces = NULL;
+}
+
+static void init_hardware_defaults(can_hardware_config_t *hw)
+{
+    if (!hw) return;
+    memset(hw, 0, sizeof(*hw));
+    snprintf(hw->interface, sizeof(hw->interface), "can0");
+    hw->bitrate = 500000;
+    hw->sjw = 1;
+    hw->sample_point = 0.875;
+    hw->restart_ms = 100;
+    hw->auto_bringup = true;
+    hw->triple_sampling = false;
 }
 
 static int parse_hardware(cJSON *hw_item, can_hardware_config_t *hw, plugin_logger_t *logger)
@@ -125,22 +133,22 @@ static int parse_mappings(cJSON *mappings_arr, can_mapping_t *mappings, int *cou
     return 0;
 }
 
-static int parse_rx_frames(cJSON *rx_arr, can_config_t *config, plugin_logger_t *logger)
+static int parse_rx_frames(cJSON *rx_arr, can_interface_config_t *iface, plugin_logger_t *logger)
 {
-    if (!cJSON_IsArray(rx_arr)) return 0;
+    if (!iface || !cJSON_IsArray(rx_arr)) return 0;
     int num = cJSON_GetArraySize(rx_arr);
     if (num <= 0) return 0;
 
-    config->rx_frames = (can_rx_frame_config_t *)calloc(num, sizeof(can_rx_frame_config_t));
-    if (!config->rx_frames) {
+    iface->rx_frames = (can_rx_frame_config_t *)calloc(num, sizeof(can_rx_frame_config_t));
+    if (!iface->rx_frames) {
         plugin_logger_error(logger, "Memory allocation failed for RX frames");
         return -1;
     }
-    config->rx_frame_count = num;
+    iface->rx_frame_count = num;
 
     for (int i = 0; i < num; i++) {
         cJSON *item = cJSON_GetArrayItem(rx_arr, i);
-        can_rx_frame_config_t *frame = &config->rx_frames[i];
+        can_rx_frame_config_t *frame = &iface->rx_frames[i];
 
         cJSON *id_item = cJSON_GetObjectItem(item, "can_id");
         if (cJSON_IsString(id_item)) {
@@ -161,28 +169,28 @@ static int parse_rx_frames(cJSON *rx_arr, can_config_t *config, plugin_logger_t 
         cJSON *mappings = cJSON_GetObjectItem(item, "mappings");
         parse_mappings(mappings, frame->mappings, &frame->mapping_count, logger);
 
-        plugin_logger_info(logger, "Parsed RX Frame #%d: ID=0x%X, eff=%d, dlc=%d, mappings=%d",
-                           i, frame->can_id, frame->eff, frame->dlc, frame->mapping_count);
+        plugin_logger_info(logger, "Parsed RX Frame #%d on %s: ID=0x%X, eff=%d, dlc=%d, mappings=%d",
+                           i, iface->hardware.interface, frame->can_id, frame->eff, frame->dlc, frame->mapping_count);
     }
     return 0;
 }
 
-static int parse_tx_frames(cJSON *tx_arr, can_config_t *config, plugin_logger_t *logger)
+static int parse_tx_frames(cJSON *tx_arr, can_interface_config_t *iface, plugin_logger_t *logger)
 {
-    if (!cJSON_IsArray(tx_arr)) return 0;
+    if (!iface || !cJSON_IsArray(tx_arr)) return 0;
     int num = cJSON_GetArraySize(tx_arr);
     if (num <= 0) return 0;
 
-    config->tx_frames = (can_tx_frame_config_t *)calloc(num, sizeof(can_tx_frame_config_t));
-    if (!config->tx_frames) {
+    iface->tx_frames = (can_tx_frame_config_t *)calloc(num, sizeof(can_tx_frame_config_t));
+    if (!iface->tx_frames) {
         plugin_logger_error(logger, "Memory allocation failed for TX frames");
         return -1;
     }
-    config->tx_frame_count = num;
+    iface->tx_frame_count = num;
 
     for (int i = 0; i < num; i++) {
         cJSON *item = cJSON_GetArrayItem(tx_arr, i);
-        can_tx_frame_config_t *frame = &config->tx_frames[i];
+        can_tx_frame_config_t *frame = &iface->tx_frames[i];
 
         cJSON *id_item = cJSON_GetObjectItem(item, "can_id");
         if (cJSON_IsString(id_item)) {
@@ -210,11 +218,36 @@ static int parse_tx_frames(cJSON *tx_arr, can_config_t *config, plugin_logger_t 
         cJSON *mappings = cJSON_GetObjectItem(item, "mappings");
         parse_mappings(mappings, frame->mappings, &frame->mapping_count, logger);
 
-        plugin_logger_info(logger, "Parsed TX Frame #%d: ID=0x%X, eff=%d, dlc=%d, trigger=%s, cycle_ms=%u, mappings=%d",
-                           i, frame->can_id, frame->eff, frame->dlc,
+        plugin_logger_info(logger, "Parsed TX Frame #%d on %s: ID=0x%X, eff=%d, dlc=%d, trigger=%s, cycle_ms=%u, mappings=%d",
+                           i, iface->hardware.interface, frame->can_id, frame->eff, frame->dlc,
                            frame->trigger == CAN_TRIGGER_ON_CHANGE ? "on_change" : "cyclic",
                            frame->cycle_time_ms, frame->mapping_count);
     }
+    return 0;
+}
+
+static int parse_interface_object(cJSON *obj, can_interface_config_t *iface, plugin_logger_t *logger)
+{
+    if (!obj || !iface) return -1;
+    memset(iface, 0, sizeof(*iface));
+    init_hardware_defaults(&iface->hardware);
+
+    cJSON *hw = cJSON_GetObjectItem(obj, "hardware_config");
+    if (!hw) {
+        hw = obj;
+    }
+    parse_hardware(hw, &iface->hardware, logger);
+
+    cJSON *rx = cJSON_GetObjectItem(obj, "rx_frames");
+    if (parse_rx_frames(rx, iface, logger) != 0) {
+        return -1;
+    }
+
+    cJSON *tx = cJSON_GetObjectItem(obj, "tx_frames");
+    if (parse_tx_frames(tx, iface, logger) != 0) {
+        return -1;
+    }
+
     return 0;
 }
 
@@ -261,14 +294,36 @@ int can_config_parse(const char *json_path, can_config_t *config, plugin_logger_
         return -1;
     }
 
-    cJSON *hw = cJSON_GetObjectItem(root, "hardware_config");
-    parse_hardware(hw, &config->hardware, logger);
+    cJSON *interfaces = cJSON_GetObjectItem(root, "interfaces");
+    if (!cJSON_IsArray(interfaces) || cJSON_GetArraySize(interfaces) <= 0) {
+        cJSON_Delete(root);
+        plugin_logger_error(logger, "CAN config must contain an interfaces[] array");
+        return -1;
+    }
 
-    cJSON *rx = cJSON_GetObjectItem(root, "rx_frames");
-    parse_rx_frames(rx, config, logger);
+    int num = cJSON_GetArraySize(interfaces);
+    if (num > MAX_CAN_INTERFACES) {
+        num = MAX_CAN_INTERFACES;
+        plugin_logger_warn(logger, "CAN config contains more than %d interfaces; truncating to %d",
+                           MAX_CAN_INTERFACES, MAX_CAN_INTERFACES);
+    }
 
-    cJSON *tx = cJSON_GetObjectItem(root, "tx_frames");
-    parse_tx_frames(tx, config, logger);
+    config->interface_count = num;
+    config->interfaces = (can_interface_config_t *)calloc(num, sizeof(can_interface_config_t));
+    if (!config->interfaces) {
+        cJSON_Delete(root);
+        plugin_logger_error(logger, "Out of memory allocating CAN interfaces");
+        return -1;
+    }
+
+    for (int i = 0; i < num; i++) {
+        cJSON *item = cJSON_GetArrayItem(interfaces, i);
+        if (parse_interface_object(item, &config->interfaces[i], logger) != 0) {
+            cJSON_Delete(root);
+            plugin_logger_error(logger, "Failed to parse CAN interface #%d", i);
+            return -1;
+        }
+    }
 
     cJSON_Delete(root);
     return 0;
@@ -277,14 +332,21 @@ int can_config_parse(const char *json_path, can_config_t *config, plugin_logger_
 void can_config_free(can_config_t *config)
 {
     if (!config) return;
-    if (config->rx_frames) {
-        free(config->rx_frames);
-        config->rx_frames = NULL;
+
+    if (config->interfaces) {
+        for (int i = 0; i < config->interface_count; i++) {
+            if (config->interfaces[i].rx_frames) {
+                free(config->interfaces[i].rx_frames);
+                config->interfaces[i].rx_frames = NULL;
+            }
+            if (config->interfaces[i].tx_frames) {
+                free(config->interfaces[i].tx_frames);
+                config->interfaces[i].tx_frames = NULL;
+            }
+        }
+        free(config->interfaces);
+        config->interfaces = NULL;
     }
-    if (config->tx_frames) {
-        free(config->tx_frames);
-        config->tx_frames = NULL;
-    }
-    config->rx_frame_count = 0;
-    config->tx_frame_count = 0;
+
+    config->interface_count = 0;
 }
