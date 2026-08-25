@@ -21,6 +21,8 @@ core/src/drivers/plugins/native/s7comm/s7comm_config.json
 __pycache__/
 .clinerules
 
+canfestival
+
 # Temporary files
 *.txt
 *.log
