@@ -87,12 +87,40 @@ static void plugin_logger_log(plugin_logger_t *logger, plugin_log_func_t log_fun
 {
     char message[MAX_LOG_MESSAGE_SIZE];
     char prefixed_message[MAX_LOG_MESSAGE_SIZE];
+    size_t used = 0;
+    size_t msg_len = 0;
 
     /* Format the user's message */
     vsnprintf(message, sizeof(message), fmt, args);
 
-    /* Add plugin name prefix */
-    snprintf(prefixed_message, sizeof(prefixed_message), "[%s] %s", logger->plugin_name, message);
+    prefixed_message[0] = '\0';
+    if (logger && logger->plugin_name[0] != '\0')
+    {
+        used = snprintf(prefixed_message, sizeof(prefixed_message), "[%s] ", logger->plugin_name);
+        if (used >= sizeof(prefixed_message))
+        {
+            used = sizeof(prefixed_message) - 1U;
+        }
+    }
+
+    msg_len = strlen(message);
+    if (strlen(prefixed_message) + msg_len >= sizeof(prefixed_message))
+    {
+        size_t remaining = sizeof(prefixed_message) - strlen(prefixed_message) - 1U;
+        if (remaining > 0U)
+        {
+            msg_len = remaining;
+        }
+        else
+        {
+            msg_len = 0U;
+        }
+    }
+
+    if (msg_len > 0U)
+    {
+        strncat(prefixed_message, message, msg_len);
+    }
 
     /* Use central logging if available, otherwise fall back to printf */
     if (log_func)

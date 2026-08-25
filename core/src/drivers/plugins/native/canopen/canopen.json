@@ -1,0 +1,43 @@
+{
+  "buses": [
+    {
+      "name": "canopen_bus_1",
+      "interface": "can0",
+      "enabled": true,
+      "node_id": 1,
+      "bitrate": 500000,
+      "heartbeat_ms": 1000,
+      "sync_period_ms": 0,
+      "od_entries": [
+        {
+          "name": "Device Type",
+          "index": "0x1000",
+          "sub_index": 0,
+          "data_type": "u32",
+          "access": "ro",
+          "default_value": 0,
+          "description": "device type",
+          "pdo_map": null
+        }
+      ],
+      "tpdo": [
+        {
+          "index": "0x1800",
+          "sub_index": 0,
+          "mapping": [
+            { "index": "0x2000", "sub_index": 0, "bit_length": 16, "name": "process_value" }
+          ]
+        }
+      ],
+      "rpdo": [
+        {
+          "index": "0x1400",
+          "sub_index": 0,
+          "mapping": [
+            { "index": "0x2001", "sub_index": 0, "bit_length": 16, "name": "command_value" }
+          ]
+        }
+      ]
+    }
+  ]
+}

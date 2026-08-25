@@ -1,0 +1,78 @@
+/**
+ * @file canopen_config.h
+ * @brief Parsed editor-generated CANopen configuration for the native runtime.
+ */
+
+#ifndef CANOPEN_CONFIG_H
+#define CANOPEN_CONFIG_H
+
+#include <stdbool.h>
+#include <stdint.h>
+#include "plugin_logger.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define MAX_CANOPEN_BUSES 8
+#define MAX_CANOPEN_OD_ENTRIES 128
+#define MAX_CANOPEN_PDO_COUNT 16
+#define MAX_CANOPEN_PDO_MAPPING 32
+#define MAX_CANOPEN_NAME_LEN 64
+
+typedef struct {
+    char name[MAX_CANOPEN_NAME_LEN];
+    uint16_t index;
+    uint8_t sub_index;
+    char data_type[16];
+    char access[8];
+    int32_t default_value;
+    char description[MAX_CANOPEN_NAME_LEN];
+    char pdo_map[8];
+} canopen_od_entry_t;
+
+typedef struct {
+    char name[MAX_CANOPEN_NAME_LEN];
+    uint16_t index;
+    uint8_t sub_index;
+    uint16_t bit_length;
+} canopen_pdo_mapping_t;
+
+typedef struct {
+    char name[MAX_CANOPEN_NAME_LEN];
+    uint16_t index;
+    uint8_t sub_index;
+    int mapping_count;
+    canopen_pdo_mapping_t mapping[MAX_CANOPEN_PDO_MAPPING];
+} canopen_pdo_t;
+
+typedef struct {
+    char name[MAX_CANOPEN_NAME_LEN];
+    char interface[32];
+    bool enabled;
+    uint16_t node_id;
+    uint32_t bitrate;
+    uint32_t heartbeat_ms;
+    uint32_t sync_period_ms;
+    int od_entry_count;
+    canopen_od_entry_t od_entries[MAX_CANOPEN_OD_ENTRIES];
+    int tpdo_count;
+    canopen_pdo_t tpdo[MAX_CANOPEN_PDO_COUNT];
+    int rpdo_count;
+    canopen_pdo_t rpdo[MAX_CANOPEN_PDO_COUNT];
+} canopen_bus_config_t;
+
+typedef struct {
+    int bus_count;
+    canopen_bus_config_t buses[MAX_CANOPEN_BUSES];
+} canopen_config_t;
+
+void canopen_config_init_defaults(canopen_config_t *config);
+int canopen_config_parse(const char *json_path, canopen_config_t *config, plugin_logger_t *logger);
+void canopen_config_free(canopen_config_t *config);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* CANOPEN_CONFIG_H */
