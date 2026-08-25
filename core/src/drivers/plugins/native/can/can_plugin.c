@@ -32,6 +32,10 @@ static uint64_t g_rx_count = 0;
 static uint64_t g_tx_count = 0;
 static uint64_t g_rx_errors = 0;
 static uint64_t g_tx_errors = 0;
+static uint64_t g_rx_count_by_iface[MAX_CAN_INTERFACES] = {0};
+static uint64_t g_tx_count_by_iface[MAX_CAN_INTERFACES] = {0};
+static uint64_t g_rx_errors_by_iface[MAX_CAN_INTERFACES] = {0};
+static uint64_t g_tx_errors_by_iface[MAX_CAN_INTERFACES] = {0};
 
 static uint64_t get_time_ms(void)
 {
@@ -62,10 +66,13 @@ static void *can_rx_thread_proc(void *arg)
 
             int res = can_socket_read(fd, &can_id, &eff, &rtr, &dlc, payload);
             if (res < 0) {
+                g_rx_errors++;
+                g_rx_errors_by_iface[iface_idx]++;
                 continue;
             }
 
             g_rx_count++;
+            g_rx_count_by_iface[iface_idx]++;
 
             can_interface_config_t *iface = &g_config.interfaces[iface_idx];
             for (int i = 0; i < iface->rx_frame_count; i++) {
@@ -177,6 +184,10 @@ int start_loop(void)
     plugin_logger_info(&g_logger, "Starting CAN Plugin for %d interfaces...", g_config.interface_count);
 
     memset(g_can_fds, -1, sizeof(g_can_fds));
+    memset(g_rx_count_by_iface, 0, sizeof(g_rx_count_by_iface));
+    memset(g_tx_count_by_iface, 0, sizeof(g_tx_count_by_iface));
+    memset(g_rx_errors_by_iface, 0, sizeof(g_rx_errors_by_iface));
+    memset(g_tx_errors_by_iface, 0, sizeof(g_tx_errors_by_iface));
     g_can_fd_count = 0;
 
     for (int iface_idx = 0; iface_idx < g_config.interface_count; iface_idx++) {
@@ -298,11 +309,13 @@ void cycle_end(void)
                 int ret = can_socket_write(fd, frame->can_id, frame->eff, false, frame->dlc, payload);
                 if (ret == 0) {
                     g_tx_count++;
+                    g_tx_count_by_iface[iface_idx]++;
                     frame->last_send_time_ms = now_ms;
                     memcpy(frame->prev_payload, payload, 8);
                     frame->has_sent_once = true;
                 } else {
                     g_tx_errors++;
+                    g_tx_errors_by_iface[iface_idx]++;
                 }
             }
         }
@@ -340,25 +353,63 @@ int get_stats(char *out, size_t out_size)
 {
     if (!out || out_size == 0) return -1;
 
-    const char *iface = "can0";
-    if (g_config.interface_count > 0 && g_config.interfaces[0].hardware.interface[0]) {
-        iface = g_config.interfaces[0].hardware.interface;
+    char iface_entries[2048] = {0};
+    size_t iface_pos = 0;
+    int have_iface_data = 0;
+
+    for (int iface_idx = 0; iface_idx < g_config.interface_count && iface_idx < MAX_CAN_INTERFACES; iface_idx++) {
+        can_interface_config_t *iface = &g_config.interfaces[iface_idx];
+        if (!iface || !iface->hardware.interface[0]) {
+            continue;
+        }
+
+        const char *iface_name = iface->hardware.interface;
+        int n = snprintf(iface_entries + iface_pos, sizeof(iface_entries) - iface_pos,
+                         "%s\"%s\":{\"label\":\"CAN Bus (%s)\",\"fields\":["
+                         "{\"label\":\"Interface\",\"value\":\"%s\"},"
+                         "{\"label\":\"RX Frames\",\"value\":%llu},"
+                         "{\"label\":\"TX Frames\",\"value\":%llu},"
+                         "{\"label\":\"RX Errors\",\"value\":%llu},"
+                         "{\"label\":\"TX Errors\",\"value\":%llu}"
+                         "]}",
+                         have_iface_data ? "," : "",
+                         iface_name,
+                         iface_name,
+                         iface_name,
+                         (unsigned long long)g_rx_count_by_iface[iface_idx],
+                         (unsigned long long)g_tx_count_by_iface[iface_idx],
+                         (unsigned long long)g_rx_errors_by_iface[iface_idx],
+                         (unsigned long long)g_tx_errors_by_iface[iface_idx]);
+
+        if (n < 0 || (size_t)n >= sizeof(iface_entries) - iface_pos) {
+            break;
+        }
+
+        iface_pos += (size_t)n;
+        have_iface_data = 1;
+    }
+
+    if (!have_iface_data) {
+        const char *fallback = "can0";
+        snprintf(out, out_size,
+                 "{\"label\":\"CAN Bus\",\"fields\":["
+                 "{\"label\":\"Interface\",\"value\":\"%s\"},"
+                 "{\"label\":\"RX Frames\",\"value\":%llu},"
+                 "{\"label\":\"TX Frames\",\"value\":%llu},"
+                 "{\"label\":\"RX Errors\",\"value\":%llu},"
+                 "{\"label\":\"TX Errors\",\"value\":%llu}"
+                 "]}",
+                 fallback,
+                 (unsigned long long)g_rx_count,
+                 (unsigned long long)g_tx_count,
+                 (unsigned long long)g_rx_errors,
+                 (unsigned long long)g_tx_errors);
+        return 0;
     }
 
     snprintf(out, out_size,
-             "{\"label\":\"CAN Bus (%s)\",\"fields\":["
-             "{\"label\":\"Interface\",\"value\":\"%s\"},"
-             "{\"label\":\"RX Frames\",\"value\":%llu},"
-             "{\"label\":\"TX Frames\",\"value\":%llu},"
-             "{\"label\":\"RX Errors\",\"value\":%llu},"
-             "{\"label\":\"TX Errors\",\"value\":%llu}"
-             "]}",
-             iface,
-             iface,
-             (unsigned long long)g_rx_count,
-             (unsigned long long)g_tx_count,
-             (unsigned long long)g_rx_errors,
-             (unsigned long long)g_tx_errors);
+             "{\"label\":\"CAN Bus\",\"interfaces\":{%s}}",
+             iface_entries);
     return 0;
 }
 
