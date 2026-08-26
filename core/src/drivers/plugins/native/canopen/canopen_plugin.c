@@ -21,7 +21,7 @@
 #define CO_CONFIG_FIFO (CO_CONFIG_FIFO_ENABLE | CO_CONFIG_GLOBAL_FLAG_TIMERNEXT)
 #endif
 #include "libs/CANopenNode/CANopen.h"
-#include "libs/CANopenNode/example/OD.h"
+#include "OD.h"
 #include "plugin_logger.h"
 #include <linux/can.h>
 #include <pthread.h>

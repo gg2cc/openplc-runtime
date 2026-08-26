@@ -6,19 +6,19 @@ CC = $(CROSS_COMPILE)gcc
 AR = $(CROSS_COMPILE)ar
 STRIP = $(CROSS_COMPILE)strip
 
-CPPFLAGS += -I../../../../lib -I../../../../drivers -I.. -I../cjson -I. -I./libs/CANopenNode -I./libs/CANopenNode/example -I$(SYSROOT)/usr/include \
+CPPFLAGS += -I../../../../lib -I../../../../drivers -I.. -I../cjson -I. -I./libs/CANopenNode -I$(SYSROOT)/usr/include \
 	-DCO_CONFIG_SDO_CLI='(CO_CONFIG_SDO_CLI_ENABLE | CO_CONFIG_SDO_CLI_SEGMENTED | CO_CONFIG_GLOBAL_FLAG_TIMERNEXT)' \
 	-DCO_CONFIG_FIFO='(CO_CONFIG_FIFO_ENABLE | CO_CONFIG_GLOBAL_FLAG_TIMERNEXT)'
-CFLAGS += -O2 -fPIC -shared -Wall -Wextra -Wno-format-truncation
+CFLAGS += -O2 -fPIC -shared -Wall -Wextra -Wno-unused-parameter -Wno-format-truncation
 LDFLAGS += -L$(SYSROOT)/usr/lib -L$(SYSROOT)/usr/lib64 -Wl,-rpath-link,$(SYSROOT)/usr/lib -Wl,-rpath-link,$(SYSROOT)/usr/lib64 -lpthread
 
 TARGET        = libcanopen_plugin.so
-SOURCES       = canopen_plugin.c canopen_config.c ../plugin_logger.c ../cjson/cJSON.c ../can/can_socket.c
+SOURCES       = canopen_plugin.c canopen_config.c OD.c CO_driver_blank.c ../plugin_logger.c ../cjson/cJSON.c ../can/can_socket.c 
 CANOPEN_NODE_SOURCES = \
-	./libs/CANopenNode/example/CO_driver_blank.c \
 	./libs/CANopenNode/301/CO_ODinterface.c \
 	./libs/CANopenNode/301/CO_fifo.c \
 	./libs/CANopenNode/301/CO_NMT_Heartbeat.c \
+    ./libs/CANopenNode/301/CO_Node_Guarding.c \
 	./libs/CANopenNode/301/CO_HBconsumer.c \
 	./libs/CANopenNode/301/CO_Emergency.c \
 	./libs/CANopenNode/301/CO_SDOclient.c \
@@ -26,11 +26,12 @@ CANOPEN_NODE_SOURCES = \
 	./libs/CANopenNode/301/CO_TIME.c \
 	./libs/CANopenNode/301/CO_SYNC.c \
 	./libs/CANopenNode/301/CO_PDO.c \
+    ./libs/CANopenNode/301/crc16-ccitt.c \
 	./libs/CANopenNode/303/CO_LEDs.c \
 	./libs/CANopenNode/305/CO_LSSslave.c \
+    ./libs/CANopenNode/305/CO_LSSmaster.c \
 	./libs/CANopenNode/storage/CO_storage.c \
-	./libs/CANopenNode/CANopen.c \
-	./libs/CANopenNode/example/OD.c
+	./libs/CANopenNode/CANopen.c
 
 all: $(TARGET)
 
