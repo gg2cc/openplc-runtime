@@ -6,7 +6,7 @@ CC = $(CROSS_COMPILE)gcc
 AR = $(CROSS_COMPILE)ar
 STRIP = $(CROSS_COMPILE)strip
 
-CPPFLAGS += -I../../../../lib -I../../../../drivers -I.. -I../cjson -I. -I$(SYSROOT)/usr/include
+CPPFLAGS += -I../../../../lib -I../../../../drivers -I.. -I../cjson -I. -I./libs/CANopenNode -I./libs/CANopenNode/example -I$(SYSROOT)/usr/include
 CFLAGS += -O2 -fPIC -shared -Wall -Wextra -Wno-format-truncation
 LDFLAGS += -L$(SYSROOT)/usr/lib -L$(SYSROOT)/usr/lib64 -Wl,-rpath-link,$(SYSROOT)/usr/lib -Wl,-rpath-link,$(SYSROOT)/usr/lib64 -lpthread
 
