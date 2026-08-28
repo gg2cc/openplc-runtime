@@ -7,13 +7,15 @@ AR = $(CROSS_COMPILE)ar
 STRIP = $(CROSS_COMPILE)strip
 
 CPPFLAGS += -I../../../../lib -I../../../../drivers -I.. -I../cjson -I. -I./libs/CANopenNode -I$(SYSROOT)/usr/include \
+	-DCO_CONFIG_NMT='(CO_CONFIG_NMT_MASTER | CO_CONFIG_GLOBAL_FLAG_CALLBACK_PRE | CO_CONFIG_GLOBAL_FLAG_TIMERNEXT)' \
+	-DCO_CONFIG_HB_CONS='(CO_CONFIG_HB_CONS_ENABLE | CO_CONFIG_GLOBAL_FLAG_CALLBACK_PRE | CO_CONFIG_GLOBAL_FLAG_TIMERNEXT)' \
 	-DCO_CONFIG_SDO_CLI='(CO_CONFIG_SDO_CLI_ENABLE | CO_CONFIG_SDO_CLI_SEGMENTED | CO_CONFIG_GLOBAL_FLAG_TIMERNEXT)' \
 	-DCO_CONFIG_FIFO='(CO_CONFIG_FIFO_ENABLE | CO_CONFIG_GLOBAL_FLAG_TIMERNEXT)'
 CFLAGS += -O2 -fPIC -shared -Wall -Wextra -Wno-unused-parameter -Wno-format-truncation
 LDFLAGS += -L$(SYSROOT)/usr/lib -L$(SYSROOT)/usr/lib64 -Wl,-rpath-link,$(SYSROOT)/usr/lib -Wl,-rpath-link,$(SYSROOT)/usr/lib64 -lpthread
 
 TARGET        = libcanopen_plugin.so
-SOURCES       = canopen_plugin.c canopen_config.c OD.c CO_driver_blank.c ../plugin_logger.c ../cjson/cJSON.c ../can/can_socket.c 
+SOURCES       = canopen_plugin.c canopen_config.c OD.c CO_driver_blank.c ../plugin_logger.c ../cjson/cJSON.c ../can/can_socket.c ../can/can_netlink.c 
 CANOPEN_NODE_SOURCES = \
 	./libs/CANopenNode/301/CO_ODinterface.c \
 	./libs/CANopenNode/301/CO_fifo.c \
@@ -44,3 +46,5 @@ clean:
 .PHONY: all clean
 
 # make -C core/src/drivers/plugins/native/canopen
+# ./core/src/deploy-to-3562.sh
+# nm -D build/plugins/libcanopen_plugin.so | grep start_loop

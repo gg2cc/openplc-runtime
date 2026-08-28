@@ -21,6 +21,7 @@ extern "C"
 #define MAX_CANOPEN_PDO_MAPPING 32
 #define MAX_CANOPEN_SDO_COUNT 32
 #define MAX_CANOPEN_NAME_LEN 64
+#define MAX_CANOPEN_SLAVES 64
 
     typedef struct
     {
@@ -72,10 +73,30 @@ extern "C"
     typedef struct
     {
         char name[MAX_CANOPEN_NAME_LEN];
-        char interface[32];
         bool enabled;
         uint16_t node_id;
+        int od_entry_count;
+        canopen_od_entry_t od_entries[MAX_CANOPEN_OD_ENTRIES];
+        int tpdo_count;
+        canopen_pdo_t tpdo[MAX_CANOPEN_PDO_COUNT];
+        int rpdo_count;
+        canopen_pdo_t rpdo[MAX_CANOPEN_PDO_COUNT];
+        int sdo_count;
+        canopen_sdo_entry_t sdo[MAX_CANOPEN_SDO_COUNT];
+    } canopen_slave_config_t;
+
+    typedef struct
+    {
+        char name[MAX_CANOPEN_NAME_LEN];
+        char interface[32];
+        bool enabled;
+        uint16_t local_node_id;
         uint32_t bitrate;
+        uint32_t sjw;
+        double sample_point;
+        uint32_t restart_ms;
+        bool triple_sampling;
+        bool auto_bringup;
         uint32_t heartbeat_ms;
         uint32_t sync_period_ms;
         int od_entry_count;
@@ -86,6 +107,8 @@ extern "C"
         canopen_pdo_t rpdo[MAX_CANOPEN_PDO_COUNT];
         int sdo_count;
         canopen_sdo_entry_t sdo[MAX_CANOPEN_SDO_COUNT];
+        int slave_count;
+        canopen_slave_config_t slaves[MAX_CANOPEN_SLAVES];
     } canopen_bus_config_t;
 
     typedef struct

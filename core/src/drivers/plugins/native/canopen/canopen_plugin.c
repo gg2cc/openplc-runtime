@@ -10,6 +10,7 @@
  */
 
 #include "canopen_plugin.h"
+#include "../can/can_netlink.h"
 #include "../can/can_socket.h"
 #include "../cjson/cJSON.h"
 #include "canopen_config.h"
@@ -20,8 +21,9 @@
 #ifndef CO_CONFIG_FIFO
 #define CO_CONFIG_FIFO (CO_CONFIG_FIFO_ENABLE | CO_CONFIG_GLOBAL_FLAG_TIMERNEXT)
 #endif
-#include "libs/CANopenNode/CANopen.h"
 #include "OD.h"
+#include "libs/CANopenNode/301/CO_ODinterface.h"
+#include "libs/CANopenNode/CANopen.h"
 #include "plugin_logger.h"
 #include <linux/can.h>
 #include <pthread.h>
@@ -526,6 +528,26 @@ static int canopen_write_plc_value_from_sdo(const canopen_bus_config_t *bus,
     return 0;
 }
 
+static const canopen_slave_config_t *canopen_find_slave_by_node_id(const canopen_bus_config_t *bus,
+                                                                   uint16_t node_id)
+{
+    if (bus == NULL)
+    {
+        return NULL;
+    }
+
+    for (int i = 0; i < bus->slave_count; i++)
+    {
+        const canopen_slave_config_t *slave = &bus->slaves[i];
+        if (slave->enabled && slave->node_id == node_id)
+        {
+            return slave;
+        }
+    }
+
+    return NULL;
+}
+
 static void canopen_queue_plc_sdo_output(const canopen_bus_config_t *bus,
                                          canopen_runtime_bus_t *runtime)
 {
@@ -535,29 +557,37 @@ static void canopen_queue_plc_sdo_output(const canopen_bus_config_t *bus,
         return;
     }
 
-    for (int i = 0; i < bus->sdo_count; i++)
+    for (int i = 0; i < bus->slave_count; i++)
     {
-        const canopen_sdo_entry_t *entry = &bus->sdo[i];
-        if (!entry->bound || entry->plc_address[0] == '\0')
+        const canopen_slave_config_t *slave = &bus->slaves[i];
+        if (!slave->enabled)
         {
             continue;
         }
-        if (!canopen_sdo_direction_matches(entry, false))
+        for (int j = 0; j < slave->sdo_count; j++)
         {
-            continue;
-        }
+            const canopen_sdo_entry_t *entry = &slave->sdo[j];
+            if (!entry->bound || entry->plc_address[0] == '\0')
+            {
+                continue;
+            }
+            if (!canopen_sdo_direction_matches(entry, false))
+            {
+                continue;
+            }
 
-        uint8_t payload[16] = {0};
-        size_t payload_len  = 0U;
-        if (!canopen_read_plc_value_for_sdo(entry, payload, sizeof(payload), &payload_len))
-        {
-            continue;
-        }
+            uint8_t payload[16] = {0};
+            size_t payload_len  = 0U;
+            if (!canopen_read_plc_value_for_sdo(entry, payload, sizeof(payload), &payload_len))
+            {
+                continue;
+            }
 
-        if (canopen_begin_sdo_request(runtime, false, runtime->node_id, entry->index,
-                                      entry->sub_index, payload, payload_len) == 0)
-        {
-            return;
+            if (canopen_begin_sdo_request(runtime, false, slave->node_id, entry->index,
+                                          entry->sub_index, payload, payload_len) == 0)
+            {
+                return;
+            }
         }
     }
 }
@@ -570,9 +600,14 @@ static void canopen_apply_sdo_upload_to_plc(const canopen_bus_config_t *bus,
         return;
     }
 
-    for (int i = 0; i < bus->sdo_count; i++)
+    const canopen_slave_config_t *slave =
+        canopen_find_slave_by_node_id(bus, runtime->sdo_transaction.node_id);
+    const canopen_sdo_entry_t *sdo_list = (slave != NULL) ? slave->sdo : bus->sdo;
+    const int sdo_count                 = (slave != NULL) ? slave->sdo_count : bus->sdo_count;
+
+    for (int i = 0; i < sdo_count; i++)
     {
-        const canopen_sdo_entry_t *entry = &bus->sdo[i];
+        const canopen_sdo_entry_t *entry = &sdo_list[i];
         if (!entry->bound || entry->plc_address[0] == '\0')
         {
             continue;
@@ -619,7 +654,7 @@ static void canopen_process_sdo_transaction(canopen_runtime_bus_t *runtime,
     size_t size_indicated         = 0U;
     size_t size_transferred       = 0U;
     uint32_t timer_next_us        = 0U;
-    CO_SDO_return_t ret           = 0;
+    CO_SDO_return_t ret           = CO_SDO_RT_ok_communicationEnd;
 
     if (runtime->sdo_transaction.read)
     {
@@ -725,6 +760,44 @@ static void canopen_dispatch_rx_message(CO_t *co, const struct can_frame *frame)
     buffer->CANrx_callback(buffer->object, &rx_msg);
 }
 
+static void canopen_runtime_normalize_tx_buffer(CO_CANmodule_t *can_mod, CO_CANtx_t *buffer)
+{
+    if (can_mod == NULL || buffer == NULL)
+    {
+        return;
+    }
+
+    uint8_t dlc = (uint8_t)((buffer->ident >> 11U) & 0x0FU);
+    if (dlc != 0U)
+    {
+        buffer->DLC = dlc;
+    }
+    if (buffer->DLC > 8U)
+    {
+        buffer->DLC = 8U;
+    }
+
+    if (buffer->DLC == 0U && !buffer->bufferFull)
+    {
+        memset(buffer->data, 0, sizeof(buffer->data));
+    }
+}
+
+static void canopen_runtime_mark_tx_pending(CO_CANmodule_t *can_mod, CO_CANtx_t *buffer)
+{
+    if (can_mod == NULL || buffer == NULL)
+    {
+        return;
+    }
+
+    canopen_runtime_normalize_tx_buffer(can_mod, buffer);
+    if (!buffer->bufferFull)
+    {
+        buffer->bufferFull = true;
+        can_mod->CANtxCount++;
+    }
+}
+
 static void canopen_flush_tx_messages(canopen_runtime_bus_t *runtime)
 {
     if (runtime == NULL || runtime->co == NULL || runtime->co->CANmodule == NULL || runtime->fd < 0)
@@ -740,6 +813,8 @@ static void canopen_flush_tx_messages(canopen_runtime_bus_t *runtime)
         {
             continue;
         }
+
+        canopen_runtime_normalize_tx_buffer(can_mod, buffer);
 
         uint32_t id = buffer->ident & 0x7FFU;
         bool rtr    = (buffer->ident & 0x8000U) != 0U;
@@ -757,6 +832,88 @@ static void canopen_flush_tx_messages(canopen_runtime_bus_t *runtime)
                 can_mod->CANtxCount--;
             }
         }
+    }
+}
+
+static void canopen_apply_heartbeat_defaults(const canopen_bus_config_t *bus, CO_t *co)
+{
+    if (bus == NULL || co == NULL)
+    {
+        return;
+    }
+
+    uint16_t heartbeat_ms = (bus->heartbeat_ms > 0U) ? (uint16_t)bus->heartbeat_ms : 1000U;
+    OD_PERSIST_COMM.x1017_producerHeartbeatTime = heartbeat_ms;
+
+    uint8_t enabled_count = 0U;
+    for (int s = 0; s < bus->slave_count; s++)
+    {
+        const canopen_slave_config_t *slave = &bus->slaves[s];
+        if (!slave->enabled || slave->node_id == 0U || slave->node_id > 127U)
+        {
+            continue;
+        }
+
+        if (enabled_count < OD_CNT_ARR_1016)
+        {
+            OD_PERSIST_COMM.x1016_consumerHeartbeatTime[enabled_count] = heartbeat_ms;
+        }
+        enabled_count++;
+    }
+    OD_PERSIST_COMM.x1016_consumerHeartbeatTime_sub0 = enabled_count;
+
+    plugin_logger_info(&g_logger,
+                       "CANopen heartbeat: producer_heartbeat_ms=%u monitored_slaves=%u bus=%s",
+                       heartbeat_ms, enabled_count, bus->name);
+
+    if (co->NMT != NULL)
+    {
+        co->NMT->HBproducerTime_us = (uint32_t)heartbeat_ms * 1000U;
+    }
+}
+
+static void canopen_start_configured_slaves(const canopen_bus_config_t *bus, CO_t *co,
+                                            canopen_runtime_bus_t *runtime)
+{
+    if (bus == NULL || co == NULL || co->NMT == NULL)
+    {
+        return;
+    }
+
+    uint8_t started = 0U;
+    for (int s = 0; s < bus->slave_count; s++)
+    {
+        const canopen_slave_config_t *slave = &bus->slaves[s];
+        if (!slave->enabled || slave->node_id == 0U || slave->node_id > 127U)
+        {
+            continue;
+        }
+
+        CO_ReturnError_t err =
+            CO_NMT_sendCommand(co->NMT, CO_NMT_ENTER_OPERATIONAL, slave->node_id);
+        if (err != CO_ERROR_NO)
+        {
+            plugin_logger_warn(&g_logger, "NMT start failed for bus=%s slave=%s node_id=%u err=%d",
+                               bus->name, slave->name, slave->node_id, err);
+            continue;
+        }
+
+        started++;
+        plugin_logger_info(&g_logger, "NMT start sent: bus=%s slave=%s node_id=%u command=0x%02X",
+                           bus->name, slave->name, slave->node_id, CO_NMT_ENTER_OPERATIONAL);
+
+        if (runtime != NULL && runtime->co != NULL && runtime->co->NMT != NULL &&
+            runtime->co->NMT->NMT_TXbuff != NULL)
+        {
+            canopen_runtime_mark_tx_pending(runtime->co->CANmodule, runtime->co->NMT->NMT_TXbuff);
+            canopen_flush_tx_messages(runtime);
+        }
+    }
+
+    if (started == 0U)
+    {
+        plugin_logger_warn(&g_logger, "No configured CANopen slave nodes were started for bus=%s",
+                           bus->name);
     }
 }
 
@@ -831,17 +988,49 @@ static void apply_od_pdo_defaults(const canopen_bus_config_t *bus)
         return;
     }
 
-    OD_PERSIST_COMM.x1018_identity.vendor_ID      = bus->node_id > 0U ? (uint32_t)bus->node_id : 1U;
+    plugin_logger_info(
+        &g_logger, "apply_od_pdo_defaults: bus=%s slave_count=%d bus_od=%d bus_tpdo=%d bus_rpdo=%d",
+        bus->name, bus->slave_count, bus->od_entry_count, bus->tpdo_count, bus->rpdo_count);
+
+    const uint16_t local_node_id = bus->local_node_id > 0U ? bus->local_node_id : 0x7FU;
+
+    /* Runtime uses the generated OD.c defaults as the source of truth. JSON od_entries are
+     * editor metadata only and are intentionally ignored here; slave PDOs are consumed from the
+     * binding table instead of dynamically creating OD entries from JSON. */
+    OD_PERSIST_COMM.x1018_identity.vendor_ID      = (uint32_t)local_node_id;
     OD_PERSIST_COMM.x1018_identity.productCode    = (uint32_t)bus->bitrate;
     OD_PERSIST_COMM.x1018_identity.revisionNumber = bus->heartbeat_ms;
     OD_PERSIST_COMM.x1018_identity.serialNumber   = bus->sync_period_ms;
 
-    if (bus->rpdo_count > 0 && bus->rpdo[0].mapping_count > 0)
+    const canopen_pdo_t *rpdo_ref = NULL;
+    const canopen_pdo_t *tpdo_ref = NULL;
+
+    for (int s = 0; s < bus->slave_count; s++)
     {
-        uint8_t count = (uint8_t)canopen_min_int(bus->rpdo[0].mapping_count, 8);
+        const canopen_slave_config_t *slave = &bus->slaves[s];
+        if (!slave->enabled)
+        {
+            continue;
+        }
+        if (rpdo_ref == NULL && slave->rpdo_count > 0 && slave->rpdo[0].mapping_count > 0)
+        {
+            rpdo_ref = &slave->rpdo[0];
+        }
+        if (tpdo_ref == NULL && slave->tpdo_count > 0 && slave->tpdo[0].mapping_count > 0)
+        {
+            tpdo_ref = &slave->tpdo[0];
+        }
+    }
+
+    if (rpdo_ref != NULL)
+    {
+        uint8_t count = (uint8_t)canopen_min_int(rpdo_ref->mapping_count, 8);
+        plugin_logger_info(&g_logger,
+                           "apply_od_pdo_defaults: selected RPDO=%s index=0x%04X mappings=%d",
+                           rpdo_ref->name, rpdo_ref->index, rpdo_ref->mapping_count);
         OD_PERSIST_COMM.x1400_RPDOCommunicationParameter.highestSub_indexSupported = 0x05U;
         OD_PERSIST_COMM.x1400_RPDOCommunicationParameter.COB_IDUsedByRPDO =
-            (bus->node_id > 0U) ? (uint32_t)(0x200U + bus->node_id) : 0x80000000U;
+            (uint32_t)(0x200U + local_node_id);
         OD_PERSIST_COMM.x1400_RPDOCommunicationParameter.transmissionType = 0xFEU;
         OD_PERSIST_COMM.x1400_RPDOCommunicationParameter.eventTimer       = 0U;
 
@@ -850,7 +1039,7 @@ static void apply_od_pdo_defaults(const canopen_bus_config_t *bus)
         OD_PERSIST_COMM.x1600_RPDOMappingParameter.numberOfMappedApplicationObjectsInPDO = count;
         for (uint8_t i = 0; i < count; i++)
         {
-            const canopen_pdo_mapping_t *mapping = &bus->rpdo[0].mapping[i];
+            const canopen_pdo_mapping_t *mapping = &rpdo_ref->mapping[i];
             uint32_t map                         = ((uint32_t)mapping->index << 16U) |
                                                    ((uint32_t)mapping->sub_index << 8U) |
                                                    ((uint32_t)mapping->bit_length & 0xFFU);
@@ -886,12 +1075,15 @@ static void apply_od_pdo_defaults(const canopen_bus_config_t *bus)
         }
     }
 
-    if (bus->tpdo_count > 0 && bus->tpdo[0].mapping_count > 0)
+    if (tpdo_ref != NULL)
     {
-        uint8_t count = (uint8_t)canopen_min_int(bus->tpdo[0].mapping_count, 8);
+        uint8_t count = (uint8_t)canopen_min_int(tpdo_ref->mapping_count, 8);
+        plugin_logger_info(&g_logger,
+                           "apply_od_pdo_defaults: selected TPDO=%s index=0x%04X mappings=%d",
+                           tpdo_ref->name, tpdo_ref->index, tpdo_ref->mapping_count);
         OD_PERSIST_COMM.x1800_TPDOCommunicationParameter.highestSub_indexSupported = 0x06U;
         OD_PERSIST_COMM.x1800_TPDOCommunicationParameter.COB_IDUsedByTPDO =
-            (bus->node_id > 0U) ? (uint32_t)(0x180U + bus->node_id) : 0x80000000U;
+            (uint32_t)(0x180U + local_node_id);
         OD_PERSIST_COMM.x1800_TPDOCommunicationParameter.transmissionType = 0xFEU;
         OD_PERSIST_COMM.x1800_TPDOCommunicationParameter.inhibitTime      = 0U;
         OD_PERSIST_COMM.x1800_TPDOCommunicationParameter.eventTimer       = 0U;
@@ -902,7 +1094,7 @@ static void apply_od_pdo_defaults(const canopen_bus_config_t *bus)
         OD_PERSIST_COMM.x1A00_TPDOMappingParameter.numberOfMappedApplicationObjectsInPDO = count;
         for (uint8_t i = 0; i < count; i++)
         {
-            const canopen_pdo_mapping_t *mapping = &bus->tpdo[0].mapping[i];
+            const canopen_pdo_mapping_t *mapping = &tpdo_ref->mapping[i];
             uint32_t map                         = ((uint32_t)mapping->index << 16U) |
                                                    ((uint32_t)mapping->sub_index << 8U) |
                                                    ((uint32_t)mapping->bit_length & 0xFFU);
@@ -1258,18 +1450,26 @@ static void sync_canopen_bus_to_plc_image(const canopen_bus_config_t *bus)
         g_args.image_lock();
     }
 
-    for (int i = 0; i < bus->tpdo_count; i++)
+    for (int s = 0; s < bus->slave_count; s++)
     {
-        for (int j = 0; j < bus->tpdo[i].mapping_count; j++)
+        const canopen_slave_config_t *slave = &bus->slaves[s];
+        if (!slave->enabled)
         {
-            canopen_bus_plc_to_od(bus, &bus->tpdo[i].mapping[j]);
+            continue;
         }
-    }
-    for (int i = 0; i < bus->rpdo_count; i++)
-    {
-        for (int j = 0; j < bus->rpdo[i].mapping_count; j++)
+        for (int i = 0; i < slave->tpdo_count; i++)
         {
-            canopen_bus_plc_to_od(bus, &bus->rpdo[i].mapping[j]);
+            for (int j = 0; j < slave->tpdo[i].mapping_count; j++)
+            {
+                canopen_bus_plc_to_od(bus, &slave->tpdo[i].mapping[j]);
+            }
+        }
+        for (int i = 0; i < slave->rpdo_count; i++)
+        {
+            for (int j = 0; j < slave->rpdo[i].mapping_count; j++)
+            {
+                canopen_bus_plc_to_od(bus, &slave->rpdo[i].mapping[j]);
+            }
         }
     }
 
@@ -1291,18 +1491,26 @@ static void sync_plc_image_to_canopen(const canopen_bus_config_t *bus)
         g_args.image_lock();
     }
 
-    for (int i = 0; i < bus->tpdo_count; i++)
+    for (int s = 0; s < bus->slave_count; s++)
     {
-        for (int j = 0; j < bus->tpdo[i].mapping_count; j++)
+        const canopen_slave_config_t *slave = &bus->slaves[s];
+        if (!slave->enabled)
         {
-            canopen_od_to_plc_input(bus, &bus->tpdo[i].mapping[j]);
+            continue;
         }
-    }
-    for (int i = 0; i < bus->rpdo_count; i++)
-    {
-        for (int j = 0; j < bus->rpdo[i].mapping_count; j++)
+        for (int i = 0; i < slave->tpdo_count; i++)
         {
-            canopen_od_to_plc_input(bus, &bus->rpdo[i].mapping[j]);
+            for (int j = 0; j < slave->tpdo[i].mapping_count; j++)
+            {
+                canopen_od_to_plc_input(bus, &slave->tpdo[i].mapping[j]);
+            }
+        }
+        for (int i = 0; i < slave->rpdo_count; i++)
+        {
+            for (int j = 0; j < slave->rpdo[i].mapping_count; j++)
+            {
+                canopen_od_to_plc_input(bus, &slave->rpdo[i].mapping[j]);
+            }
         }
     }
 
@@ -1324,11 +1532,37 @@ static int init_runtime_bus(const canopen_bus_config_t *bus, int bus_index)
     g_runtime_buses[bus_index].co          = co;
     g_runtime_buses[bus_index].initialized = true;
     g_runtime_buses[bus_index].node_id =
-        (uint8_t)((bus->node_id >= 1U && bus->node_id <= 127U) ? bus->node_id : 0xFFU);
+        (uint8_t)((bus->local_node_id >= 1U && bus->local_node_id <= 127U) ? bus->local_node_id
+                                                                           : 0xFFU);
     g_runtime_buses[bus_index].bitrate = bus->bitrate;
     g_runtime_buses[bus_index].fd      = -1;
 
+    for (int s = 0; s < bus->slave_count; s++)
+    {
+        const canopen_slave_config_t *slave = &bus->slaves[s];
+        plugin_logger_info(
+            &g_logger,
+            "Bus[%d] slave[%d]: name=%s node_id=%u enabled=%d od_entries=%d tpdo=%d rpdo=%d sdo=%d",
+            bus_index, s, slave->name, slave->node_id, slave->enabled, slave->od_entry_count,
+            slave->tpdo_count, slave->rpdo_count, slave->sdo_count);
+        for (int i = 0; i < slave->tpdo_count; i++)
+        {
+            plugin_logger_info(&g_logger,
+                               "Bus[%d] slave[%d] TPDO[%d]: name=%s index=0x%04X mappings=%d",
+                               bus_index, s, i, slave->tpdo[i].name, slave->tpdo[i].index,
+                               slave->tpdo[i].mapping_count);
+        }
+        for (int i = 0; i < slave->rpdo_count; i++)
+        {
+            plugin_logger_info(&g_logger,
+                               "Bus[%d] slave[%d] RPDO[%d]: name=%s index=0x%04X mappings=%d",
+                               bus_index, s, i, slave->rpdo[i].name, slave->rpdo[i].index,
+                               slave->rpdo[i].mapping_count);
+        }
+    }
+
     apply_od_pdo_defaults(bus);
+    canopen_apply_heartbeat_defaults(bus, co);
 
     uint32_t errInfo     = 0U;
     uint16_t bitRate     = get_bus_bitrate_kbps(bus);
@@ -1355,6 +1589,11 @@ static int init_runtime_bus(const canopen_bus_config_t *bus, int bus_index)
         return -1;
     }
 
+    plugin_logger_info(&g_logger,
+                       "CO_CANopenInitPDO start: bus=%s local_node_id=%u OD_CNT_TPDO=%d "
+                       "OD_CNT_RPDO=%d slave_count=%d",
+                       bus->name, g_runtime_buses[bus_index].node_id, OD_CNT_TPDO, OD_CNT_RPDO,
+                       bus->slave_count);
     err = CO_CANopenInitPDO(co, co->em, OD, g_runtime_buses[bus_index].node_id, &errInfo);
     if (err != CO_ERROR_NO && err != CO_ERROR_NODE_ID_UNCONFIGURED_LSS)
     {
@@ -1365,9 +1604,23 @@ static int init_runtime_bus(const canopen_bus_config_t *bus, int bus_index)
         g_runtime_buses[bus_index].initialized = false;
         return -1;
     }
+    plugin_logger_info(
+        &g_logger, "CO_CANopenInitPDO success: bus=%s node_id=%u tpdo_count=%d rpdo_count=%d",
+        bus->name, g_runtime_buses[bus_index].node_id, bus->tpdo_count, bus->rpdo_count);
 
     if (bus->interface[0] != '\0')
     {
+        can_hardware_config_t hw = {0};
+        snprintf(hw.interface, sizeof(hw.interface), "%s", bus->interface);
+        hw.bitrate         = bus->bitrate;
+        hw.sjw             = bus->sjw;
+        hw.sample_point    = bus->sample_point;
+        hw.restart_ms      = bus->restart_ms;
+        hw.triple_sampling = bus->triple_sampling;
+        hw.auto_bringup    = bus->auto_bringup;
+
+        can_netlink_configure_and_up(&hw, &g_logger);
+
         g_runtime_buses[bus_index].fd = can_socket_open(bus->interface, &g_logger);
         if (g_runtime_buses[bus_index].fd < 0)
         {
@@ -1379,11 +1632,18 @@ static int init_runtime_bus(const canopen_bus_config_t *bus, int bus_index)
     }
 
     CO_CANsetNormalMode(co->CANmodule);
+
+    if (g_runtime_buses[bus_index].fd >= 0)
+    {
+        canopen_start_configured_slaves(bus, co, &g_runtime_buses[bus_index]);
+    }
+
     plugin_logger_info(&g_logger,
-                       "CANopen runtime bound: bus=%s interface=%s node_id=%u bitrate=%u "
+                       "CANopen runtime bound: bus=%s interface=%s local_node_id=%u bitrate=%u "
                        "od_entries=%d tpdo=%d rpdo=%d socket_fd=%d",
-                       bus->name, bus->interface, bus->node_id, bus->bitrate, bus->od_entry_count,
-                       bus->tpdo_count, bus->rpdo_count, g_runtime_buses[bus_index].fd);
+                       bus->name, bus->interface, bus->local_node_id, bus->bitrate,
+                       bus->od_entry_count, bus->tpdo_count, bus->rpdo_count,
+                       g_runtime_buses[bus_index].fd);
     return 0;
 }
 
@@ -1470,11 +1730,11 @@ int start_loop(void)
         {
             g_runtime_bus_count++;
         }
-        plugin_logger_info(
-            &g_logger,
-            "Bus[%d]: name=%s interface=%s node_id=%u bitrate=%u od_entries=%d tpdo=%d rpdo=%d", i,
-            bus->name, bus->interface, bus->node_id, bus->bitrate, bus->od_entry_count,
-            bus->tpdo_count, bus->rpdo_count);
+        plugin_logger_info(&g_logger,
+                           "Bus[%d]: name=%s interface=%s local_node_id=%u bitrate=%u "
+                           "od_entries=%d tpdo=%d rpdo=%d",
+                           i, bus->name, bus->interface, bus->local_node_id, bus->bitrate,
+                           bus->od_entry_count, bus->tpdo_count, bus->rpdo_count);
     }
 
     if (g_runtime_bus_count > 0)
@@ -1512,6 +1772,13 @@ void cycle_end(void)
             }
             canopen_flush_tx_messages(&g_runtime_buses[i]);
             CO_process(g_runtime_buses[i].co, false, 1000U, NULL);
+            if (g_runtime_buses[i].co != NULL && g_runtime_buses[i].co->NMT != NULL &&
+                g_runtime_buses[i].co->NMT->HB_TXbuff != NULL)
+            {
+                canopen_runtime_mark_tx_pending(g_runtime_buses[i].co->CANmodule,
+                                                g_runtime_buses[i].co->NMT->HB_TXbuff);
+            }
+            canopen_flush_tx_messages(&g_runtime_buses[i]);
         }
     }
 }
@@ -1627,16 +1894,17 @@ int execute_command(const char *command_json, char *response, size_t response_si
         }
 
         cJSON *node = cJSON_GetObjectItem(root, "node_id");
-        if (node != NULL)
+        if (node == NULL || (!cJSON_IsNumber(node) && !cJSON_IsString(node)))
         {
-            node_id =
-                (uint8_t)(cJSON_IsNumber(node) ? node->valueint
-                                               : (uint8_t)strtoul(node->valuestring, NULL, 0));
+            snprintf(
+                response, response_size,
+                "{\"status\":\"sdo_read_failed\",\"reason\":\"missing_node_id\",\"bus\":\"%s\"}",
+                g_config.buses[bus_index].name);
+            cJSON_Delete(root);
+            return 0;
         }
-        else if (g_runtime_bus_count > 0)
-        {
-            node_id = g_runtime_buses[bus_index].node_id;
-        }
+        node_id = (uint8_t)(cJSON_IsNumber(node) ? node->valueint
+                                                 : (uint8_t)strtoul(node->valuestring, NULL, 0));
 
         if (g_runtime_buses[bus_index].co != NULL &&
             g_runtime_buses[bus_index].co->SDOclient != NULL)
@@ -1687,16 +1955,17 @@ int execute_command(const char *command_json, char *response, size_t response_si
         }
 
         cJSON *node = cJSON_GetObjectItem(root, "node_id");
-        if (node != NULL)
+        if (node == NULL || (!cJSON_IsNumber(node) && !cJSON_IsString(node)))
         {
-            node_id =
-                (uint8_t)(cJSON_IsNumber(node) ? node->valueint
-                                               : (uint8_t)strtoul(node->valuestring, NULL, 0));
+            cJSON_Delete(root);
+            snprintf(
+                response, response_size,
+                "{\"status\":\"sdo_write_failed\",\"reason\":\"missing_node_id\",\"bus\":\"%s\"}",
+                g_config.buses[bus_index].name);
+            return 0;
         }
-        else if (g_runtime_bus_count > 0)
-        {
-            node_id = g_runtime_buses[bus_index].node_id;
-        }
+        node_id = (uint8_t)(cJSON_IsNumber(node) ? node->valueint
+                                                 : (uint8_t)strtoul(node->valuestring, NULL, 0));
 
         cJSON *value = cJSON_GetObjectItem(root, "value");
         if (value != NULL)

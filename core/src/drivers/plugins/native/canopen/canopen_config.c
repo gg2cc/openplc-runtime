@@ -135,49 +135,6 @@ static void parse_binding_fields(cJSON *item, char *plc_address, size_t plc_addr
     {
         copy_string(direction, direction_size, direction_field->valuestring);
     }
-
-    cJSON *binding = cJSON_GetObjectItem(item, "binding");
-    if (cJSON_IsObject(binding))
-    {
-        cJSON *binding_direction = cJSON_GetObjectItem(binding, "direction");
-        if (cJSON_IsString(binding_direction) && binding_direction->valuestring &&
-            direction[0] == '\0')
-        {
-            copy_string(direction, direction_size, binding_direction->valuestring);
-        }
-
-        cJSON *binding_address = cJSON_GetObjectItem(binding, "iec_address");
-        if (!plc_address[0] && cJSON_IsString(binding_address) && binding_address->valuestring)
-        {
-            copy_string(plc_address, plc_address_size, binding_address->valuestring);
-        }
-
-        cJSON *binding_plc_address = cJSON_GetObjectItem(binding, "plc_address");
-        if (!plc_address[0] && cJSON_IsString(binding_plc_address) &&
-            binding_plc_address->valuestring)
-        {
-            copy_string(plc_address, plc_address_size, binding_plc_address->valuestring);
-        }
-
-        cJSON *binding_iec_address = cJSON_GetObjectItem(binding, "iecAddress");
-        if (!plc_address[0] && cJSON_IsString(binding_iec_address) &&
-            binding_iec_address->valuestring)
-        {
-            copy_string(plc_address, plc_address_size, binding_iec_address->valuestring);
-        }
-    }
-
-    cJSON *iec_address_field = cJSON_GetObjectItem(item, "iec_address");
-    if (!plc_address[0] && cJSON_IsString(iec_address_field) && iec_address_field->valuestring)
-    {
-        copy_string(plc_address, plc_address_size, iec_address_field->valuestring);
-    }
-
-    cJSON *iec_address_camel = cJSON_GetObjectItem(item, "iecAddress");
-    if (!plc_address[0] && cJSON_IsString(iec_address_camel) && iec_address_camel->valuestring)
-    {
-        copy_string(plc_address, plc_address_size, iec_address_camel->valuestring);
-    }
 }
 
 static void parse_pdo_mapping(cJSON *item, canopen_pdo_mapping_t *mapping)
@@ -380,13 +337,127 @@ static void parse_pdo(cJSON *items, int *count, canopen_pdo_t *pdo_list, const c
     }
 }
 
+static void parse_slave(cJSON *item, canopen_slave_config_t *slave, plugin_logger_t *logger)
+{
+    if (!item || !slave)
+        return;
+    memset(slave, 0, sizeof(*slave));
+    slave->enabled = true;
+
+    cJSON *name = cJSON_GetObjectItem(item, "name");
+    if (cJSON_IsString(name) && name->valuestring)
+    {
+        copy_string(slave->name, sizeof(slave->name), name->valuestring);
+    }
+
+    cJSON *enabled = cJSON_GetObjectItem(item, "enabled");
+    if (cJSON_IsBool(enabled))
+    {
+        slave->enabled = cJSON_IsTrue(enabled);
+    }
+
+    cJSON *node_id = cJSON_GetObjectItem(item, "node_id");
+    if (cJSON_IsString(node_id) && node_id->valuestring)
+    {
+        slave->node_id = (uint16_t)parse_u16_literal(node_id->valuestring);
+    }
+    else if (cJSON_IsNumber(node_id))
+    {
+        slave->node_id = (uint16_t)node_id->valueint;
+    }
+
+    cJSON *od_entries = cJSON_GetObjectItem(item, "od_entries");
+    if (cJSON_IsArray(od_entries))
+    {
+        int total = cJSON_GetArraySize(od_entries);
+        for (int i = 0; i < total && i < MAX_CANOPEN_OD_ENTRIES; i++)
+        {
+            cJSON *entry = cJSON_GetArrayItem(od_entries, i);
+            if (!entry)
+                continue;
+            parse_od_entry(entry, &slave->od_entries[slave->od_entry_count], logger);
+            slave->od_entry_count++;
+        }
+    }
+
+    cJSON *tpdo = cJSON_GetObjectItem(item, "tpdo");
+    parse_pdo(tpdo, &slave->tpdo_count, slave->tpdo, "tpdo", logger);
+
+    cJSON *rpdo = cJSON_GetObjectItem(item, "rpdo");
+    parse_pdo(rpdo, &slave->rpdo_count, slave->rpdo, "rpdo", logger);
+
+    cJSON *sdo = cJSON_GetObjectItem(item, "sdo");
+    if (cJSON_IsArray(sdo))
+    {
+        int total = cJSON_GetArraySize(sdo);
+        for (int i = 0; i < total && i < MAX_CANOPEN_SDO_COUNT; i++)
+        {
+            cJSON *entry = cJSON_GetArrayItem(sdo, i);
+            if (!entry)
+                continue;
+            parse_sdo_entry(entry, &slave->sdo[slave->sdo_count], logger);
+            slave->sdo_count++;
+        }
+    }
+
+    if (slave->name[0] == '\0' && slave->node_id > 0U)
+    {
+        snprintf(slave->name, sizeof(slave->name), "slave_%u", (unsigned int)slave->node_id);
+    }
+
+    if (logger)
+    {
+        plugin_logger_debug(logger,
+                            "Slave parsed: name=%s node_id=%u od_entries=%d tpdo=%d rpdo=%d sdo=%d",
+                            slave->name, slave->node_id, slave->od_entry_count, slave->tpdo_count,
+                            slave->rpdo_count, slave->sdo_count);
+    }
+}
+
+static void aggregate_bus_counts_from_slaves(canopen_bus_config_t *bus, plugin_logger_t *logger)
+{
+    if (!bus)
+        return;
+
+    bus->od_entry_count = 0;
+    bus->tpdo_count     = 0;
+    bus->rpdo_count     = 0;
+    bus->sdo_count      = 0;
+
+    for (int i = 0; i < bus->slave_count; i++)
+    {
+        const canopen_slave_config_t *slave = &bus->slaves[i];
+        if (!slave->enabled)
+        {
+            continue;
+        }
+        bus->od_entry_count += slave->od_entry_count;
+        bus->tpdo_count += slave->tpdo_count;
+        bus->rpdo_count += slave->rpdo_count;
+        bus->sdo_count += slave->sdo_count;
+    }
+
+    if (logger)
+    {
+        plugin_logger_debug(logger, "Bus aggregate: slaves=%d od_entries=%d tpdo=%d rpdo=%d sdo=%d",
+                            bus->slave_count, bus->od_entry_count, bus->tpdo_count, bus->rpdo_count,
+                            bus->sdo_count);
+    }
+}
+
 static void parse_bus(cJSON *item, canopen_bus_config_t *bus, plugin_logger_t *logger)
 {
     if (!item || !bus)
         return;
     memset(bus, 0, sizeof(*bus));
-    bus->enabled = true;
-    bus->bitrate = 500000;
+    bus->enabled         = true;
+    bus->bitrate         = 500000;
+    bus->sjw             = 1U;
+    bus->sample_point    = 0.875;
+    bus->restart_ms      = 100U;
+    bus->triple_sampling = false;
+    bus->auto_bringup    = true;
+    bus->local_node_id   = 127U;
 
     cJSON *name = cJSON_GetObjectItem(item, "name");
     if (cJSON_IsString(name) && name->valuestring)
@@ -406,14 +477,14 @@ static void parse_bus(cJSON *item, canopen_bus_config_t *bus, plugin_logger_t *l
         bus->enabled = cJSON_IsTrue(enabled);
     }
 
-    cJSON *node_id = cJSON_GetObjectItem(item, "node_id");
-    if (cJSON_IsString(node_id) && node_id->valuestring)
+    cJSON *local_node_id = cJSON_GetObjectItem(item, "local_node_id");
+    if (cJSON_IsString(local_node_id) && local_node_id->valuestring)
     {
-        bus->node_id = (uint16_t)parse_u16_literal(node_id->valuestring);
+        bus->local_node_id = (uint16_t)parse_u16_literal(local_node_id->valuestring);
     }
-    else if (cJSON_IsNumber(node_id))
+    else if (cJSON_IsNumber(local_node_id))
     {
-        bus->node_id = (uint16_t)node_id->valueint;
+        bus->local_node_id = (uint16_t)local_node_id->valueint;
     }
 
     cJSON *bitrate = cJSON_GetObjectItem(item, "bitrate");
@@ -424,6 +495,48 @@ static void parse_bus(cJSON *item, canopen_bus_config_t *bus, plugin_logger_t *l
     else if (cJSON_IsNumber(bitrate))
     {
         bus->bitrate = (uint32_t)bitrate->valueint;
+    }
+
+    cJSON *sjw = cJSON_GetObjectItem(item, "sjw");
+    if (cJSON_IsString(sjw) && sjw->valuestring)
+    {
+        bus->sjw = (uint32_t)strtoul(sjw->valuestring, NULL, 0);
+    }
+    else if (cJSON_IsNumber(sjw))
+    {
+        bus->sjw = (uint32_t)sjw->valueint;
+    }
+
+    cJSON *sample_point = cJSON_GetObjectItem(item, "sample_point");
+    if (cJSON_IsNumber(sample_point))
+    {
+        bus->sample_point = sample_point->valuedouble;
+    }
+    else if (cJSON_IsString(sample_point) && sample_point->valuestring)
+    {
+        bus->sample_point = strtod(sample_point->valuestring, NULL);
+    }
+
+    cJSON *restart_ms = cJSON_GetObjectItem(item, "restart_ms");
+    if (cJSON_IsString(restart_ms) && restart_ms->valuestring)
+    {
+        bus->restart_ms = (uint32_t)strtoul(restart_ms->valuestring, NULL, 0);
+    }
+    else if (cJSON_IsNumber(restart_ms))
+    {
+        bus->restart_ms = (uint32_t)restart_ms->valueint;
+    }
+
+    cJSON *triple_sampling = cJSON_GetObjectItem(item, "triple_sampling");
+    if (cJSON_IsBool(triple_sampling))
+    {
+        bus->triple_sampling = cJSON_IsTrue(triple_sampling);
+    }
+
+    cJSON *auto_bringup = cJSON_GetObjectItem(item, "auto_bringup");
+    if (cJSON_IsBool(auto_bringup))
+    {
+        bus->auto_bringup = cJSON_IsTrue(auto_bringup);
     }
 
     cJSON *heartbeat = cJSON_GetObjectItem(item, "heartbeat_ms");
@@ -472,18 +585,35 @@ static void parse_bus(cJSON *item, canopen_bus_config_t *bus, plugin_logger_t *l
         }
     }
 
+    cJSON *slaves = cJSON_GetObjectItem(item, "slaves");
+    if (cJSON_IsArray(slaves))
+    {
+        int total = cJSON_GetArraySize(slaves);
+        for (int i = 0; i < total && i < MAX_CANOPEN_SLAVES; i++)
+        {
+            cJSON *slave_item = cJSON_GetArrayItem(slaves, i);
+            if (!slave_item)
+                continue;
+            parse_slave(slave_item, &bus->slaves[bus->slave_count], logger);
+            bus->slave_count++;
+        }
+    }
+
     if (bus->name[0] == '\0' && bus->interface[0] != '\0')
     {
         copy_string(bus->name, sizeof(bus->name), bus->interface);
     }
 
+    aggregate_bus_counts_from_slaves(bus, logger);
+
     if (logger)
     {
         plugin_logger_debug(logger,
-                            "CANopen bus parsed: name=%s interface=%s node_id=%u bitrate=%u "
-                            "od_entries=%d tpdo=%d rpdo=%d sdo=%d",
-                            bus->name, bus->interface, bus->node_id, bus->bitrate,
-                            bus->od_entry_count, bus->tpdo_count, bus->rpdo_count, bus->sdo_count);
+                            "CANopen bus parsed: name=%s interface=%s local_node_id=%u bitrate=%u "
+                            "od_entries=%d tpdo=%d rpdo=%d sdo=%d slaves=%d",
+                            bus->name, bus->interface, bus->local_node_id, bus->bitrate,
+                            bus->od_entry_count, bus->tpdo_count, bus->rpdo_count, bus->sdo_count,
+                            bus->slave_count);
     }
 }
 
