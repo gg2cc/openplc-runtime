@@ -224,12 +224,6 @@ static void parse_sdo_entry(cJSON *item, canopen_sdo_entry_t *entry, plugin_logg
         copy_string(entry->data_type, sizeof(entry->data_type), data_type->valuestring);
     }
 
-    cJSON *access = cJSON_GetObjectItem(item, "access");
-    if (cJSON_IsString(access) && access->valuestring)
-    {
-        copy_string(entry->access, sizeof(entry->access), access->valuestring);
-    }
-
     cJSON *default_value = cJSON_GetObjectItem(item, "default_value");
     if (cJSON_IsNumber(default_value))
     {
@@ -246,18 +240,11 @@ static void parse_sdo_entry(cJSON *item, canopen_sdo_entry_t *entry, plugin_logg
         copy_string(entry->description, sizeof(entry->description), description->valuestring);
     }
 
-    parse_binding_fields(item, entry->plc_address, sizeof(entry->plc_address), entry->direction,
-                         sizeof(entry->direction));
-    entry->bound = (entry->plc_address[0] != '\0' && entry->direction[0] != '\0');
-
     if (logger)
     {
-        plugin_logger_debug(
-            logger, "SDO entry: name=%s index=0x%04X sub=%u data_type=%s bound=%s plc=%s dir=%s",
-            entry->name, entry->index, entry->sub_index,
-            entry->data_type[0] ? entry->data_type : "u32", entry->bound ? "yes" : "no",
-            entry->plc_address[0] ? entry->plc_address : "none",
-            entry->direction[0] ? entry->direction : "none");
+        plugin_logger_debug(logger, "SDO entry: name=%s index=0x%04X sub=%u data_type=%s",
+                            entry->name, entry->index, entry->sub_index,
+                            entry->data_type[0] ? entry->data_type : "u32");
     }
 }
 

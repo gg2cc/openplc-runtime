@@ -62,12 +62,8 @@ extern "C"
         uint16_t index;
         uint8_t sub_index;
         char data_type[16];
-        char access[8];
         int32_t default_value;
         char description[MAX_CANOPEN_NAME_LEN];
-        char plc_address[32];
-        char direction[8];
-        bool bound;
     } canopen_sdo_entry_t;
 
     typedef struct

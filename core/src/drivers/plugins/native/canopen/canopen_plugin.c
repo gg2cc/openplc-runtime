@@ -140,7 +140,9 @@ static void canopen_apply_heartbeat_defaults(const canopen_bus_config_t *bus, CO
 
         if (enabled_count < OD_CNT_ARR_1016)
         {
-            OD_PERSIST_COMM.x1016_consumerHeartbeatTime[enabled_count] = heartbeat_ms;
+            // Each entry in the consumer heartbeat time array is a 32-bit value where the upper 16 bits are the node ID and the lower 16 bits are the heartbeat time in milliseconds multiplied by 2 (as per CANopen specification). 
+            OD_PERSIST_COMM.x1016_consumerHeartbeatTime[enabled_count] =
+                (((uint32_t)slave->node_id << 16U) | (uint16_t)(heartbeat_ms * 2U));
         }
         enabled_count++;
     }
@@ -894,6 +896,194 @@ static void sync_plc_image_to_canopen(const canopen_bus_config_t *bus)
     }
 }
 
+static bool canopen_encode_sdo_payload(const canopen_sdo_entry_t *entry, uint8_t *payload,
+                                       size_t payload_size, size_t *payload_len)
+{
+    if (entry == NULL || payload == NULL || payload_len == NULL)
+    {
+        return false;
+    }
+
+    const char *type = entry->data_type[0] != '\0' ? entry->data_type : "u32";
+    int64_t raw      = (int64_t)entry->default_value;
+
+    if (strcasecmp(type, "bool") == 0 || strcasecmp(type, "boolean") == 0)
+    {
+        if (payload_size < 1U)
+        {
+            return false;
+        }
+        payload[0]   = (uint8_t)(raw != 0 ? 1U : 0U);
+        *payload_len = 1U;
+        return true;
+    }
+
+    if (strcasecmp(type, "u8") == 0 || strcasecmp(type, "byte") == 0 ||
+        strcasecmp(type, "uint8") == 0 || strcasecmp(type, "int8") == 0 ||
+        strcasecmp(type, "sint8") == 0)
+    {
+        if (payload_size < 1U)
+        {
+            return false;
+        }
+        payload[0]   = (uint8_t)(raw & 0xFF);
+        *payload_len = 1U;
+        return true;
+    }
+
+    if (strcasecmp(type, "u16") == 0 || strcasecmp(type, "uint16") == 0 ||
+        strcasecmp(type, "i16") == 0 || strcasecmp(type, "int16") == 0)
+    {
+        if (payload_size < 2U)
+        {
+            return false;
+        }
+        uint16_t value = (uint16_t)(raw & 0xFFFF);
+        memcpy(payload, &value, sizeof(value));
+        *payload_len = sizeof(value);
+        return true;
+    }
+
+    if (strcasecmp(type, "u32") == 0 || strcasecmp(type, "uint32") == 0 ||
+        strcasecmp(type, "i32") == 0 || strcasecmp(type, "int32") == 0)
+    {
+        if (payload_size < 4U)
+        {
+            return false;
+        }
+        uint32_t value = (uint32_t)raw;
+        memcpy(payload, &value, sizeof(value));
+        *payload_len = sizeof(value);
+        return true;
+    }
+
+    if (strcasecmp(type, "u64") == 0 || strcasecmp(type, "uint64") == 0 ||
+        strcasecmp(type, "i64") == 0 || strcasecmp(type, "int64") == 0)
+    {
+        if (payload_size < 8U)
+        {
+            return false;
+        }
+        uint64_t value = (uint64_t)raw;
+        memcpy(payload, &value, sizeof(value));
+        *payload_len = sizeof(value);
+        return true;
+    }
+
+    return false;
+}
+
+static bool canopen_send_sdo_write(CO_t *co, uint8_t node_id, const canopen_sdo_entry_t *entry)
+{
+    if (co == NULL || co->SDOclient == NULL || entry == NULL)
+    {
+        return false;
+    }
+
+    uint8_t payload[8] = {0};
+    size_t payload_len = 0U;
+    if (!canopen_encode_sdo_payload(entry, payload, sizeof(payload), &payload_len))
+    {
+        plugin_logger_warn(&g_logger,
+                           "Skipping unsupported SDO write: node=%u index=0x%04X sub=%u type=%s",
+                           node_id, entry->index, entry->sub_index,
+                           entry->data_type[0] != '\0' ? entry->data_type : "u32");
+        return false;
+    }
+
+    CO_SDOclient_t *sdo_client = &co->SDOclient[0];
+    CO_SDO_return_t ret = CO_SDOclient_setup(sdo_client, (uint32_t)CO_CAN_ID_SDO_CLI + node_id,
+                                             (uint32_t)CO_CAN_ID_SDO_SRV + node_id, node_id);
+    if (ret != CO_SDO_RT_ok_communicationEnd)
+    {
+        plugin_logger_warn(&g_logger, "SDO setup failed for node=%u index=0x%04X sub=%u ret=%d",
+                           node_id, entry->index, entry->sub_index, ret);
+        return false;
+    }
+
+    ret = CO_SDOclientDownloadInitiate(sdo_client, entry->index, entry->sub_index, payload_len,
+                                       1000U, false);
+    if (ret != CO_SDO_RT_ok_communicationEnd)
+    {
+        plugin_logger_warn(&g_logger, "SDO initiate failed for node=%u index=0x%04X sub=%u ret=%d",
+                           node_id, entry->index, entry->sub_index, ret);
+        return false;
+    }
+
+    size_t written                = CO_SDOclientDownloadBufWrite(sdo_client, payload, payload_len);
+    bool partial                  = (written < payload_len);
+    CO_SDO_abortCode_t abort_code = CO_SDO_AB_NONE;
+
+    do
+    {
+        uint32_t time_difference_us = 10000U;
+        ret = CO_SDOclientDownload(sdo_client, time_difference_us, false, partial, &abort_code,
+                                   NULL, NULL);
+        if (ret < 0)
+        {
+            plugin_logger_warn(&g_logger,
+                               "SDO download failed for node=%u index=0x%04X sub=%u abort=0x%08X",
+                               node_id, entry->index, entry->sub_index, abort_code);
+            return false;
+        }
+        if (ret > 0)
+        {
+            usleep(time_difference_us / 1000U);
+        }
+    } while (ret > 0);
+
+    plugin_logger_info(&g_logger,
+                       "SDO write sent once: bus local node=%u target_node=%u index=0x%04X sub=%u "
+                       "len=%zu value=%d",
+                       co->NMT->nodeId, node_id, entry->index, entry->sub_index, payload_len,
+                       entry->default_value);
+    return true;
+}
+
+static void canopen_send_configured_sdos(const canopen_bus_config_t *bus,
+                                         canopen_runtime_bus_t *runtime)
+{
+    if (bus == NULL || runtime == NULL || runtime->co == NULL)
+    {
+        return;
+    }
+
+    if (runtime->co->SDOclient == NULL)
+    {
+        plugin_logger_warn(&g_logger,
+                           "SDO client unavailable on bus=%s; skipping configured SDO writes",
+                           bus->name);
+        return;
+    }
+
+    int sent_count = 0;
+    for (int s = 0; s < bus->slave_count; s++)
+    {
+        const canopen_slave_config_t *slave = &bus->slaves[s];
+        if (!slave->enabled || slave->node_id == 0U || slave->node_id > 127U)
+        {
+            continue;
+        }
+
+        for (int i = 0; i < slave->sdo_count; i++)
+        {
+            const canopen_sdo_entry_t *entry = &slave->sdo[i];
+            if (entry->index == 0U)
+            {
+                continue;
+            }
+
+            if (canopen_send_sdo_write(runtime->co, slave->node_id, entry))
+            {
+                sent_count++;
+            }
+        }
+    }
+
+    plugin_logger_info(&g_logger, "Configured SDO writes completed for bus=%s sent=%d", bus->name,
+                       sent_count);
+}
+
 static int init_runtime_bus(const canopen_bus_config_t *bus, int bus_index)
 {
     CO_t *co = CO_new(NULL, NULL);
@@ -944,8 +1134,10 @@ static int init_runtime_bus(const canopen_bus_config_t *bus, int bus_index)
         }
     }
 
-    apply_od_pdo_defaults(bus);
-    canopen_apply_heartbeat_defaults(bus, co);
+    apply_od_pdo_defaults(
+        bus); // Apply PDO defaults to the Object Dictionary based on the bus configuration
+    canopen_apply_heartbeat_defaults(
+        bus, co); // Apply heartbeat defaults to the CANopen stack based on the bus configuration
 
     plugin_logger_info(&g_logger,
                        "CANopen init sequence: step=interface_ready bus=%s if=%s bitrate=%u",
@@ -1106,7 +1298,12 @@ static int init_runtime_bus(const canopen_bus_config_t *bus, int bus_index)
         g_runtime_buses[bus_index].epoll_ready = true;
         plugin_logger_info(&g_logger, "CANopen Linux epoll runtime enabled for bus=%s interface=%s",
                            bus->name, bus->interface);
+
+        /* Start the slave state machine first; only then send the startup SDO writes.
+         * Sending SDOs before the remote node is actually started may cause no response and
+         * abort 0x05040000 (SDO protocol timed out). */
         canopen_start_configured_slaves(bus, co, &g_runtime_buses[bus_index]);
+        canopen_send_configured_sdos(bus, &g_runtime_buses[bus_index]);
     }
     else
     {
