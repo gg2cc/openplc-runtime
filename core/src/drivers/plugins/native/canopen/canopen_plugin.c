@@ -22,10 +22,10 @@
 #define CO_CONFIG_FIFO (CO_CONFIG_FIFO_ENABLE | CO_CONFIG_GLOBAL_FLAG_TIMERNEXT)
 #endif
 
-#include "OD.h"
 #include "libs/CANopenLinux/CO_epoll_interface.h"
 #include "libs/CANopenNode/301/CO_ODinterface.h"
 #include "libs/CANopenNode/CANopen.h"
+#include "OD.h"
 #include "plugin_logger.h"
 #include <linux/can.h>
 #include <pthread.h>
@@ -34,6 +34,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <syslog.h>
+#include <time.h>
 #include <unistd.h>
 
 #define CANOPEN_NMT_CONTROL                                                                        \
@@ -68,8 +69,15 @@ typedef struct
     CO_t *co;
     bool initialized;
     bool epoll_ready;
+    bool startup_confirmed;
+    bool reconnect_required;
+    bool bootup_seen;
     uint8_t node_id;
     uint32_t bitrate;
+    uint32_t last_start_ms;
+    uint32_t last_heartbeat_ms;
+    uint32_t last_bootup_ms;
+    uint8_t retry_count;
     int fd;
     CO_epoll_t epoll;
     canopen_sdo_transaction_t sdo_transaction;
@@ -101,79 +109,14 @@ static void reset_runtime_state(void)
     g_canopen_rx_running = false;
 }
 
-static void canopen_runtime_normalize_tx_buffer(CO_CANmodule_t *can_mod, CO_CANtx_t *buffer)
+static uint32_t canopen_now_ms(void)
 {
-    if (can_mod == NULL || buffer == NULL)
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0)
     {
-        return;
+        return 0U;
     }
-
-    uint8_t dlc = (uint8_t)((buffer->ident >> 11U) & 0x0FU);
-    if (dlc != 0U)
-    {
-        buffer->DLC = dlc;
-    }
-    if (buffer->DLC > 8U)
-    {
-        buffer->DLC = 8U;
-    }
-
-    if (buffer->DLC == 0U && !buffer->bufferFull)
-    {
-        memset(buffer->data, 0, sizeof(buffer->data));
-    }
-}
-
-static void canopen_runtime_mark_tx_pending(CO_CANmodule_t *can_mod, CO_CANtx_t *buffer)
-{
-    if (can_mod == NULL || buffer == NULL)
-    {
-        return;
-    }
-
-    canopen_runtime_normalize_tx_buffer(can_mod, buffer);
-    if (!buffer->bufferFull)
-    {
-        buffer->bufferFull = true;
-        can_mod->CANtxCount++;
-    }
-}
-
-static void canopen_flush_tx_messages(canopen_runtime_bus_t *runtime)
-{
-    if (runtime == NULL || runtime->co == NULL || runtime->co->CANmodule == NULL || runtime->fd < 0)
-    {
-        return;
-    }
-
-    CO_CANmodule_t *can_mod = runtime->co->CANmodule;
-    for (uint16_t idx = 0; idx < can_mod->txSize; idx++)
-    {
-        CO_CANtx_t *buffer = &can_mod->txArray[idx];
-        if (!buffer->bufferFull)
-        {
-            continue;
-        }
-
-        canopen_runtime_normalize_tx_buffer(can_mod, buffer);
-
-        uint32_t id = buffer->ident & 0x7FFU;
-        bool rtr    = (buffer->ident & 0x8000U) != 0U;
-        uint8_t dlc = buffer->DLC;
-        if (dlc > 8U)
-        {
-            dlc = 8U;
-        }
-
-        if (can_socket_write(runtime->fd, id, false, rtr, dlc, buffer->data) == 0)
-        {
-            buffer->bufferFull = false;
-            if (can_mod->CANtxCount > 0U)
-            {
-                can_mod->CANtxCount--;
-            }
-        }
-    }
+    return (uint32_t)((uint64_t)ts.tv_sec * 1000ULL + (uint64_t)ts.tv_nsec / 1000000ULL);
 }
 
 static void canopen_apply_heartbeat_defaults(const canopen_bus_config_t *bus, CO_t *co)
@@ -213,10 +156,123 @@ static void canopen_apply_heartbeat_defaults(const canopen_bus_config_t *bus, CO
     }
 }
 
+static void canopen_hb_state_changed(uint8_t nodeId, uint8_t idx, CO_NMT_internalState_t state,
+                                     void *object)
+{
+    (void)idx;
+    canopen_runtime_bus_t *runtime = (canopen_runtime_bus_t *)object;
+    if (runtime == NULL)
+    {
+        return;
+    }
+
+    runtime->last_heartbeat_ms = canopen_now_ms();
+
+    if (state == CO_NMT_INITIALIZING)
+    {
+        runtime->bootup_seen        = true;
+        runtime->reconnect_required = true;
+        runtime->startup_confirmed  = false;
+        runtime->last_bootup_ms     = runtime->last_heartbeat_ms;
+        plugin_logger_warn(
+            &g_logger,
+            "CANopen lifecycle: boot-up detected from node %u, restarting start sequence", nodeId);
+        return;
+    }
+
+    if (state == CO_NMT_OPERATIONAL)
+    {
+        runtime->startup_confirmed  = true;
+        runtime->reconnect_required = false;
+        runtime->retry_count        = 0U;
+        plugin_logger_info(
+            &g_logger, "CANopen lifecycle: node %u reached Operational; startup confirmed", nodeId);
+        return;
+    }
+
+    if (state == CO_NMT_STOPPED || state == CO_NMT_PRE_OPERATIONAL)
+    {
+        runtime->startup_confirmed  = false;
+        runtime->reconnect_required = true;
+        plugin_logger_warn(&g_logger, "CANopen lifecycle: node %u not operational yet (state=%d)",
+                           nodeId, state);
+    }
+}
+
+static void canopen_runtime_lifecycle_tick(const canopen_bus_config_t *bus,
+                                           canopen_runtime_bus_t *runtime)
+{
+    if (bus == NULL || runtime == NULL || runtime->co == NULL || runtime->co->HBcons == NULL)
+    {
+        return;
+    }
+
+    bool any_operational = false;
+    bool any_bootup      = false;
+    bool any_timeout     = false;
+    uint32_t now_ms      = canopen_now_ms();
+
+    for (uint8_t i = 0; i < runtime->co->HBcons->numberOfMonitoredNodes; i++)
+    {
+        CO_HBconsNode_t *node = &runtime->co->HBconsMonitoredNodes[i];
+        if (node == NULL || node->nodeId == 0U)
+        {
+            continue;
+        }
+
+        if (node->HBstate == CO_HBconsumer_TIMEOUT)
+        {
+            any_timeout = true;
+        }
+        if (node->NMTstate == CO_NMT_INITIALIZING)
+        {
+            any_bootup = true;
+        }
+        if (node->NMTstate == CO_NMT_OPERATIONAL)
+        {
+            any_operational = true;
+        }
+    }
+
+    if (any_bootup)
+    {
+        runtime->bootup_seen        = true;
+        runtime->reconnect_required = true;
+        runtime->startup_confirmed  = false;
+        runtime->last_bootup_ms     = now_ms;
+    }
+    if (any_timeout)
+    {
+        runtime->reconnect_required = true;
+        runtime->startup_confirmed  = false;
+        runtime->retry_count++;
+        plugin_logger_warn(&g_logger,
+                           "CANopen lifecycle: heartbeat timeout on bus=%s; scheduling reconnect",
+                           bus->name);
+    }
+    if (any_operational)
+    {
+        runtime->startup_confirmed  = true;
+        runtime->reconnect_required = false;
+        runtime->retry_count        = 0U;
+    }
+}
+
 static void canopen_start_configured_slaves(const canopen_bus_config_t *bus, CO_t *co,
                                             canopen_runtime_bus_t *runtime)
 {
     if (bus == NULL || co == NULL || co->NMT == NULL)
+    {
+        return;
+    }
+
+    uint32_t now_ms = canopen_now_ms();
+    if (runtime != NULL && runtime->startup_confirmed && !runtime->reconnect_required)
+    {
+        return;
+    }
+    if (runtime != NULL && runtime->last_start_ms != 0U &&
+        (now_ms - runtime->last_start_ms) < 1000U)
     {
         return;
     }
@@ -240,15 +296,12 @@ static void canopen_start_configured_slaves(const canopen_bus_config_t *bus, CO_
         }
 
         started++;
+        runtime->last_start_ms      = now_ms;
+        runtime->startup_confirmed  = false;
+        runtime->reconnect_required = false;
+        runtime->retry_count++;
         plugin_logger_info(&g_logger, "NMT start sent: bus=%s slave=%s node_id=%u command=0x%02X",
                            bus->name, slave->name, slave->node_id, CO_NMT_ENTER_OPERATIONAL);
-
-        if (runtime != NULL && runtime->co != NULL && runtime->co->NMT != NULL &&
-            runtime->co->NMT->NMT_TXbuff != NULL)
-        {
-            canopen_runtime_mark_tx_pending(runtime->co->CANmodule, runtime->co->NMT->NMT_TXbuff);
-            canopen_flush_tx_messages(runtime);
-        }
     }
 
     if (started == 0U)
@@ -850,15 +903,22 @@ static int init_runtime_bus(const canopen_bus_config_t *bus, int bus_index)
         return -1;
     }
 
-    g_runtime_buses[bus_index].co          = co;
-    g_runtime_buses[bus_index].initialized = true;
-    g_runtime_buses[bus_index].epoll_ready = false;
+    g_runtime_buses[bus_index].co                 = co;
+    g_runtime_buses[bus_index].initialized        = true;
+    g_runtime_buses[bus_index].epoll_ready        = false;
+    g_runtime_buses[bus_index].startup_confirmed  = false;
+    g_runtime_buses[bus_index].reconnect_required = false;
+    g_runtime_buses[bus_index].bootup_seen        = false;
     memset(&g_runtime_buses[bus_index].epoll, 0, sizeof(g_runtime_buses[bus_index].epoll));
     g_runtime_buses[bus_index].node_id =
         (uint8_t)((bus->local_node_id >= 1U && bus->local_node_id <= 127U) ? bus->local_node_id
                                                                            : 0xFFU);
-    g_runtime_buses[bus_index].bitrate = bus->bitrate;
-    g_runtime_buses[bus_index].fd      = -1;
+    g_runtime_buses[bus_index].bitrate           = bus->bitrate;
+    g_runtime_buses[bus_index].last_start_ms     = 0U;
+    g_runtime_buses[bus_index].last_heartbeat_ms = 0U;
+    g_runtime_buses[bus_index].last_bootup_ms    = 0U;
+    g_runtime_buses[bus_index].retry_count       = 0U;
+    g_runtime_buses[bus_index].fd                = -1;
 
     for (int s = 0; s < bus->slave_count; s++)
     {
@@ -983,6 +1043,12 @@ static int init_runtime_bus(const canopen_bus_config_t *bus, int bus_index)
                        "CANopen init sequence: step=CO_CANinit OK bus=%s if=%s local_node_id=%u",
                        bus->name, bus->interface, g_runtime_buses[bus_index].node_id);
 
+    if (co->HBcons != NULL)
+    {
+        CO_HBconsumer_initCallbackNmtChanged(co->HBcons, 0U, &g_runtime_buses[bus_index],
+                                             canopen_hb_state_changed);
+    }
+
     plugin_logger_info(
         &g_logger,
         "CANopen init sequence: step=CO_CANopenInit bus=%s local_node_id=%u heartbeat_ms=%u",
@@ -1033,22 +1099,20 @@ static int init_runtime_bus(const canopen_bus_config_t *bus, int bus_index)
 
     if (g_runtime_buses[bus_index].fd >= 0)
     {
-        if (CO_epoll_create(&g_runtime_buses[bus_index].epoll, 1000U) == CO_ERROR_NO)
-        {
-            CO_epoll_initCANopenMain(&g_runtime_buses[bus_index].epoll, co);
-            g_runtime_buses[bus_index].epoll_ready = true;
-            plugin_logger_info(&g_logger,
-                               "CANopen Linux epoll runtime enabled for bus=%s interface=%s",
-                               bus->name, bus->interface);
-        }
-        else
-        {
-            plugin_logger_warn(
-                &g_logger,
-                "CO_epoll_create() failed for bus=%s; falling back to basic adapter mode",
-                bus->name);
-        }
+        /* Use the CANopenLinux mainloop pattern: one epoll instance, initialized once,
+         * attached to the stack before normal mode is enabled. This keeps the OpenPLC
+         * plugin as a thin adapter rather than maintaining a second runtime loop. */
+        CO_epoll_initCANopenMain(&g_runtime_buses[bus_index].epoll, co);
+        g_runtime_buses[bus_index].epoll_ready = true;
+        plugin_logger_info(&g_logger, "CANopen Linux epoll runtime enabled for bus=%s interface=%s",
+                           bus->name, bus->interface);
         canopen_start_configured_slaves(bus, co, &g_runtime_buses[bus_index]);
+    }
+    else
+    {
+        plugin_logger_warn(
+            &g_logger, "CANopen Linux runtime not started for bus=%s because socket is not ready",
+            bus->name);
     }
 
     plugin_logger_info(&g_logger,
@@ -1177,12 +1241,17 @@ void cycle_end(void)
 
         if (g_runtime_buses[i].initialized && g_runtime_buses[i].co != NULL)
         {
+            canopen_runtime_lifecycle_tick(bus, &g_runtime_buses[i]);
+            if (g_runtime_buses[i].reconnect_required || !g_runtime_buses[i].startup_confirmed)
+            {
+                canopen_start_configured_slaves(bus, g_runtime_buses[i].co, &g_runtime_buses[i]);
+            }
+
             /* Thin adapter phase: keep PLC↔PDO translation, but do not run a
              * custom SDO transaction loop. The Linux CANopen runtime handles the
              * protocol processing itself in the worker thread. */
             sync_plc_image_to_canopen(bus);
             sync_canopen_bus_to_plc_image(bus);
-            canopen_flush_tx_messages(&g_runtime_buses[i]);
         }
     }
 }
