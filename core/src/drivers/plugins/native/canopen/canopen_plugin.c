@@ -72,6 +72,7 @@ typedef struct
     bool startup_confirmed;
     bool reconnect_required;
     bool bootup_seen;
+    bool startup_sdo_sent;
     uint8_t node_id;
     uint32_t bitrate;
     uint32_t last_start_ms;
@@ -80,11 +81,14 @@ typedef struct
     uint8_t retry_count;
     int fd;
     CO_epoll_t epoll;
+    pthread_mutex_t stack_mutex;
     canopen_sdo_transaction_t sdo_transaction;
 } canopen_runtime_bus_t;
 
 static int canopen_parse_iec_address(const char *address, char *prefix, size_t prefix_len,
                                      int *index, int *bit);
+static void canopen_send_configured_sdos(const canopen_bus_config_t *bus,
+                                         canopen_runtime_bus_t *runtime);
 
 static plugin_runtime_args_t g_args;
 static plugin_logger_t g_logger;
@@ -140,9 +144,33 @@ static void canopen_apply_heartbeat_defaults(const canopen_bus_config_t *bus, CO
 
         if (enabled_count < OD_CNT_ARR_1016)
         {
-            // Each entry in the consumer heartbeat time array is a 32-bit value where the upper 16 bits are the node ID and the lower 16 bits are the heartbeat time in milliseconds multiplied by 2 (as per CANopen specification). 
+            uint16_t slave_heartbeat_ms = 0U;
+            for (int i = 0; i < slave->sdo_count; i++)
+            {
+                if (slave->sdo[i].index == 0x1017U && slave->sdo[i].sub_index == 0U)
+                {
+                    slave_heartbeat_ms = (uint16_t)slave->sdo[i].default_value;
+                    break;
+                }
+            }
+            if (slave_heartbeat_ms == 0U)
+            {
+                plugin_logger_warn(&g_logger,
+                                   "CANopen heartbeat: missing slave 0x1017 value for node_id=%u",
+                                   slave->node_id);
+                continue;
+            }
+
+            /* Each 0x1016 entry stores the node ID in bits 31..16 and the heartbeat timeout
+             * in milliseconds in bits 15..0. */
+            uint16_t consumer_timeout_ms = (uint16_t)((slave_heartbeat_ms * 3U) / 2U);
             OD_PERSIST_COMM.x1016_consumerHeartbeatTime[enabled_count] =
-                (((uint32_t)slave->node_id << 16U) | (uint16_t)(heartbeat_ms * 2U));
+                (((uint32_t)slave->node_id << 16U) | (uint32_t)consumer_timeout_ms);
+            plugin_logger_info(&g_logger,
+                               "CANopen heartbeat: consumer_timeout_ms=%u slave_producer_ms=%u node_id=%u "
+                               "bus=%s",
+                               consumer_timeout_ms, slave_heartbeat_ms, slave->node_id,
+                               bus->name);
         }
         enabled_count++;
     }
@@ -186,6 +214,7 @@ static void canopen_hb_state_changed(uint8_t nodeId, uint8_t idx, CO_NMT_interna
     {
         runtime->startup_confirmed  = true;
         runtime->reconnect_required = false;
+        runtime->startup_sdo_sent   = false;
         runtime->retry_count        = 0U;
         plugin_logger_info(
             &g_logger, "CANopen lifecycle: node %u reached Operational; startup confirmed", nodeId);
@@ -238,13 +267,22 @@ static void canopen_runtime_lifecycle_tick(const canopen_bus_config_t *bus,
 
     if (any_bootup)
     {
+        if (runtime->startup_confirmed)
+        {
+            runtime->startup_sdo_sent = false;
+        }
         runtime->bootup_seen        = true;
         runtime->reconnect_required = true;
         runtime->startup_confirmed  = false;
+        runtime->startup_sdo_sent   = false;
         runtime->last_bootup_ms     = now_ms;
     }
     if (any_timeout)
     {
+        if (runtime->startup_confirmed)
+        {
+            runtime->startup_sdo_sent = false;
+        }
         runtime->reconnect_required = true;
         runtime->startup_confirmed  = false;
         runtime->retry_count++;
@@ -263,7 +301,7 @@ static void canopen_runtime_lifecycle_tick(const canopen_bus_config_t *bus,
 static void canopen_start_configured_slaves(const canopen_bus_config_t *bus, CO_t *co,
                                             canopen_runtime_bus_t *runtime)
 {
-    if (bus == NULL || co == NULL || co->NMT == NULL)
+    if (bus == NULL || co == NULL || co->NMT == NULL || runtime == NULL)
     {
         return;
     }
@@ -288,8 +326,10 @@ static void canopen_start_configured_slaves(const canopen_bus_config_t *bus, CO_
             continue;
         }
 
+        pthread_mutex_lock(&runtime->stack_mutex);
         CO_ReturnError_t err =
             CO_NMT_sendCommand(co->NMT, CO_NMT_ENTER_OPERATIONAL, slave->node_id);
+        pthread_mutex_unlock(&runtime->stack_mutex);
         if (err != CO_ERROR_NO)
         {
             plugin_logger_warn(&g_logger, "NMT start failed for bus=%s slave=%s node_id=%u err=%d",
@@ -310,6 +350,14 @@ static void canopen_start_configured_slaves(const canopen_bus_config_t *bus, CO_
     {
         plugin_logger_warn(&g_logger, "No configured CANopen slave nodes were started for bus=%s",
                            bus->name);
+    }
+    else if (!runtime->startup_sdo_sent)
+    {
+        canopen_send_configured_sdos(bus, runtime);
+        runtime->startup_sdo_sent = true;
+        plugin_logger_info(&g_logger,
+                           "Configured SDOs sent after NMT start: bus=%s recovery_count=%u",
+                           bus->name, runtime->retry_count);
     }
 }
 
@@ -332,10 +380,12 @@ static void *canopen_linux_runtime_worker_proc(void *arg)
             any_bus_ready = true;
 
             CO_NMT_reset_cmd_t reset = CO_RESET_NOT;
+            pthread_mutex_lock(&runtime->stack_mutex);
             CO_epoll_wait(&runtime->epoll);
             CO_epoll_processMain(&runtime->epoll, runtime->co, true, &reset);
             CO_epoll_processRT(&runtime->epoll, runtime->co, false);
             CO_epoll_processLast(&runtime->epoll);
+            pthread_mutex_unlock(&runtime->stack_mutex);
         }
 
         if (!any_bus_ready)
@@ -973,17 +1023,20 @@ static bool canopen_encode_sdo_payload(const canopen_sdo_entry_t *entry, uint8_t
     return false;
 }
 
-static bool canopen_send_sdo_write(CO_t *co, uint8_t node_id, const canopen_sdo_entry_t *entry)
+static bool canopen_send_sdo_write(canopen_runtime_bus_t *runtime, uint8_t node_id, const canopen_sdo_entry_t *entry)
 {
-    if (co == NULL || co->SDOclient == NULL || entry == NULL)
+    if (runtime == NULL || runtime->co == NULL || runtime->co->SDOclient == NULL || entry == NULL)
     {
         return false;
     }
 
+    CO_t *co = runtime->co;
+    pthread_mutex_lock(&runtime->stack_mutex);
     uint8_t payload[8] = {0};
     size_t payload_len = 0U;
     if (!canopen_encode_sdo_payload(entry, payload, sizeof(payload), &payload_len))
     {
+        pthread_mutex_unlock(&runtime->stack_mutex);
         plugin_logger_warn(&g_logger,
                            "Skipping unsupported SDO write: node=%u index=0x%04X sub=%u type=%s",
                            node_id, entry->index, entry->sub_index,
@@ -996,6 +1049,7 @@ static bool canopen_send_sdo_write(CO_t *co, uint8_t node_id, const canopen_sdo_
                                              (uint32_t)CO_CAN_ID_SDO_SRV + node_id, node_id);
     if (ret != CO_SDO_RT_ok_communicationEnd)
     {
+        pthread_mutex_unlock(&runtime->stack_mutex);
         plugin_logger_warn(&g_logger, "SDO setup failed for node=%u index=0x%04X sub=%u ret=%d",
                            node_id, entry->index, entry->sub_index, ret);
         return false;
@@ -1005,6 +1059,7 @@ static bool canopen_send_sdo_write(CO_t *co, uint8_t node_id, const canopen_sdo_
                                        1000U, false);
     if (ret != CO_SDO_RT_ok_communicationEnd)
     {
+        pthread_mutex_unlock(&runtime->stack_mutex);
         plugin_logger_warn(&g_logger, "SDO initiate failed for node=%u index=0x%04X sub=%u ret=%d",
                            node_id, entry->index, entry->sub_index, ret);
         return false;
@@ -1016,21 +1071,34 @@ static bool canopen_send_sdo_write(CO_t *co, uint8_t node_id, const canopen_sdo_
 
     do
     {
-        uint32_t time_difference_us = 10000U;
+        CO_NMT_reset_cmd_t reset = CO_RESET_NOT;
+        if (runtime->epoll_ready)
+        {
+            CO_epoll_wait(&runtime->epoll);
+            CO_epoll_processMain(&runtime->epoll, runtime->co, true, &reset);
+            CO_epoll_processRT(&runtime->epoll, runtime->co, false);
+            CO_epoll_processLast(&runtime->epoll);
+        }
+
+        uint32_t time_difference_us = runtime->epoll.timeDifference_us;
+        if (time_difference_us == 0U)
+        {
+            time_difference_us = 10000U;
+        }
+
         ret = CO_SDOclientDownload(sdo_client, time_difference_us, false, partial, &abort_code,
                                    NULL, NULL);
         if (ret < 0)
         {
+            pthread_mutex_unlock(&runtime->stack_mutex);
             plugin_logger_warn(&g_logger,
                                "SDO download failed for node=%u index=0x%04X sub=%u abort=0x%08X",
                                node_id, entry->index, entry->sub_index, abort_code);
             return false;
         }
-        if (ret > 0)
-        {
-            usleep(time_difference_us / 1000U);
-        }
     } while (ret > 0);
+
+    pthread_mutex_unlock(&runtime->stack_mutex);
 
     plugin_logger_info(&g_logger,
                        "SDO write sent once: bus local node=%u target_node=%u index=0x%04X sub=%u "
@@ -1056,6 +1124,9 @@ static void canopen_send_configured_sdos(const canopen_bus_config_t *bus,
         return;
     }
 
+    /* Give slaves a small pause to process NMT start before issuing SDO writes */
+    usleep(50000U);
+
     int sent_count = 0;
     for (int s = 0; s < bus->slave_count; s++)
     {
@@ -1073,7 +1144,7 @@ static void canopen_send_configured_sdos(const canopen_bus_config_t *bus,
                 continue;
             }
 
-            if (canopen_send_sdo_write(runtime->co, slave->node_id, entry))
+            if (canopen_send_sdo_write(runtime, slave->node_id, entry))
             {
                 sent_count++;
             }
@@ -1099,6 +1170,7 @@ static int init_runtime_bus(const canopen_bus_config_t *bus, int bus_index)
     g_runtime_buses[bus_index].startup_confirmed  = false;
     g_runtime_buses[bus_index].reconnect_required = false;
     g_runtime_buses[bus_index].bootup_seen        = false;
+    g_runtime_buses[bus_index].startup_sdo_sent   = false;
     memset(&g_runtime_buses[bus_index].epoll, 0, sizeof(g_runtime_buses[bus_index].epoll));
     g_runtime_buses[bus_index].node_id =
         (uint8_t)((bus->local_node_id >= 1U && bus->local_node_id <= 127U) ? bus->local_node_id
@@ -1109,6 +1181,7 @@ static int init_runtime_bus(const canopen_bus_config_t *bus, int bus_index)
     g_runtime_buses[bus_index].last_bootup_ms    = 0U;
     g_runtime_buses[bus_index].retry_count       = 0U;
     g_runtime_buses[bus_index].fd                = -1;
+    pthread_mutex_init(&g_runtime_buses[bus_index].stack_mutex, NULL);
 
     for (int s = 0; s < bus->slave_count; s++)
     {
@@ -1303,7 +1376,6 @@ static int init_runtime_bus(const canopen_bus_config_t *bus, int bus_index)
          * Sending SDOs before the remote node is actually started may cause no response and
          * abort 0x05040000 (SDO protocol timed out). */
         canopen_start_configured_slaves(bus, co, &g_runtime_buses[bus_index]);
-        canopen_send_configured_sdos(bus, &g_runtime_buses[bus_index]);
     }
     else
     {
@@ -1473,6 +1545,10 @@ void stop_loop(void)
         {
             can_socket_close(g_runtime_buses[i].fd);
             g_runtime_buses[i].fd = -1;
+        }
+        if (g_runtime_buses[i].initialized)
+        {
+            pthread_mutex_destroy(&g_runtime_buses[i].stack_mutex);
         }
     }
 }
