@@ -1328,10 +1328,162 @@ static bool canopen_send_sdo_write(canopen_runtime_bus_t *runtime, uint8_t node_
 
     plugin_logger_info(&g_logger,
                        "SDO write sent once: bus local node=%u target_node=%u index=0x%04X sub=%u "
-                       "len=%zu value=%d",
+                       "len=%zu value=0x%08X",
                        co->NMT->nodeId, node_id, entry->index, entry->sub_index, payload_len,
                        entry->default_value);
     return true;
+}
+
+static void canopen_add_pdo_mapping_sdos(const canopen_slave_config_t *slave,
+                                         canopen_sdo_entry_t *entries, int *entry_count)
+{
+    if (slave == NULL || entries == NULL || entry_count == NULL)
+    {
+        return;
+    }
+
+    int count = *entry_count;
+
+    // Add RPDO entries
+    for (int p = 0; p < slave->rpdo_count; p++)
+    {
+        const canopen_pdo_t *pdo = &slave->rpdo[p];
+        if (pdo == NULL || pdo->mapping_count <= 0)
+        {
+            continue;
+        }
+
+        uint16_t comm_index = pdo->index; // 0x1400 - 0x1407
+        uint16_t map_index  = (uint16_t)(pdo->index + 0x200U); // 0x1600 - 0x1607
+        uint32_t cob_id = (uint32_t)(0x200U + ((uint32_t)(comm_index - 0x1400U) * 0x100U) +
+                                     slave->node_id);
+
+        snprintf(entries[count].name, sizeof(entries[count].name), "rpdo_%d_map_count", p + 1);
+        entries[count].index         = map_index;
+        entries[count].sub_index     = 0U;
+        entries[count].data_type[0]  = 'u';
+        entries[count].data_type[1]  = '8';
+        entries[count].default_value = pdo->mapping_count; // the number of mapped application objects in the PDO
+        count++;
+
+        for (int m = 0; m < pdo->mapping_count; m++)
+        {
+            const canopen_pdo_mapping_t *mapping = &pdo->mapping[m];
+            if (mapping == NULL)
+            {
+                continue;
+            }
+
+            snprintf(entries[count].name, sizeof(entries[count].name), "rpdo_%d_map_%d", p + 1,
+                     m + 1);
+            entries[count].index        = map_index;
+            entries[count].sub_index    = (uint8_t)(m + 1U);
+            entries[count].data_type[0] = 'u';
+            entries[count].data_type[1] = '3';
+            entries[count].data_type[2] = '2';
+            entries[count].default_value =
+                (int32_t)(((uint32_t)mapping->index << 16U) | ((uint32_t)mapping->sub_index << 8U) |
+                          (uint32_t)mapping->bit_length); // the mapping value is a 32-bit value that encodes the index, sub-index, and bit length of the mapped object
+            count++;
+        }
+
+        snprintf(entries[count].name, sizeof(entries[count].name), "rpdo_%d_cob_id", p + 1);
+        entries[count].index         = comm_index;
+        entries[count].sub_index     = 1U;
+        entries[count].data_type[0]  = 'u';
+        entries[count].data_type[1]  = '3';
+        entries[count].data_type[2]  = '2';
+        entries[count].default_value = (int32_t)cob_id; // the COB-ID used by the RPDO
+        count++;
+
+        snprintf(entries[count].name, sizeof(entries[count].name), "rpdo_%d_trans_type", p + 1);
+        entries[count].index         = comm_index;
+        entries[count].sub_index     = 2U;
+        entries[count].data_type[0]  = 'u';
+        entries[count].data_type[1]  = '8';
+        entries[count].default_value = 0xFF; // the transmission type of the RPDO
+        count++;
+    }
+
+    for (int p = 0; p < slave->tpdo_count; p++)
+    {
+        const canopen_pdo_t *pdo = &slave->tpdo[p];
+        if (pdo == NULL || pdo->mapping_count <= 0)
+        {
+            continue;
+        }
+
+        uint16_t comm_index = pdo->index;
+        uint16_t map_index  = (uint16_t)(pdo->index + 0x200U);
+        uint32_t cob_id = (uint32_t)(0x180U + ((uint32_t)(comm_index - 0x1800U) * 0x100U) +
+                                     slave->node_id);
+
+        snprintf(entries[count].name, sizeof(entries[count].name), "tpdo_%d_map_count", p + 1);
+        entries[count].index         = map_index;
+        entries[count].sub_index     = 0U;
+        entries[count].data_type[0]  = 'u';
+        entries[count].data_type[1]  = '8';
+        entries[count].default_value = pdo->mapping_count; // the number of mapped application objects in the PDO
+        count++;
+        
+        for (int m = 0; m < pdo->mapping_count; m++)
+        {
+            const canopen_pdo_mapping_t *mapping = &pdo->mapping[m];
+            if (mapping == NULL)
+            {
+                continue;
+            }
+
+            snprintf(entries[count].name, sizeof(entries[count].name), "tpdo_%d_map_%d", p + 1,
+                     m + 1);
+            entries[count].index        = map_index;
+            entries[count].sub_index    = (uint8_t)(m + 1U);
+            entries[count].data_type[0] = 'u';
+            entries[count].data_type[1] = '3';
+            entries[count].data_type[2] = '2';
+            entries[count].default_value =
+                (int32_t)(((uint32_t)mapping->index << 16U) | ((uint32_t)mapping->sub_index << 8U) |
+                          (uint32_t)mapping->bit_length); // the mapping value is a 32-bit value that encodes the index, sub-index, and bit length of the mapped object
+            count++;
+        }
+
+        snprintf(entries[count].name, sizeof(entries[count].name), "tpdo_%d_cob_id", p + 1);
+        entries[count].index         = comm_index;
+        entries[count].sub_index     = 1U;
+        entries[count].data_type[0]  = 'u';
+        entries[count].data_type[1]  = '3';
+        entries[count].data_type[2]  = '2';
+        entries[count].default_value = (int32_t)cob_id; // the COB-ID used by the TPDO
+        count++;
+
+        snprintf(entries[count].name, sizeof(entries[count].name), "tpdo_%d_trans_type", p + 1);
+        entries[count].index         = comm_index;
+        entries[count].sub_index     = 2U;
+        entries[count].data_type[0]  = 'u';
+        entries[count].data_type[1]  = '8';
+        entries[count].default_value = 0xFF; // the transmission type of the TPDO
+        count++;
+
+        snprintf(entries[count].name, sizeof(entries[count].name), "tpdo_%d_inhibit_time", p + 1);
+        entries[count].index         = comm_index;
+        entries[count].sub_index     = 3U;
+        entries[count].data_type[0]  = 'u';
+        entries[count].data_type[1]  = '1';
+        entries[count].data_type[2]  = '6';
+        entries[count].default_value = 500; // the inhibit time of the TPDO in milliseconds
+        count++;
+
+        snprintf(entries[count].name, sizeof(entries[count].name), "tpdo_%d_event_timer", p + 1);
+        entries[count].index         = comm_index;
+        entries[count].sub_index     = 5U;
+        entries[count].data_type[0]  = 'u';
+        entries[count].data_type[1]  = '1';
+        entries[count].data_type[2]  = '6';
+        entries[count].default_value = 0; // the event timer of the TPDO in milliseconds (0 means no event timer)
+        count++;
+    }
+
+    *entry_count = count;
 }
 
 static void canopen_send_configured_sdos(const canopen_bus_config_t *bus,
@@ -1419,6 +1571,18 @@ static void canopen_send_configured_sdos(const canopen_bus_config_t *bus,
         for (int i = 0; i < protection_sdo_count; i++)
         {
             if (canopen_send_sdo_write(runtime, slave->node_id, &protection_sdos[i]))
+            {
+                sent_count++;
+            }
+        }
+
+        canopen_sdo_entry_t generated_sdos[64];
+        int generated_sdo_count = 0;
+        memset(generated_sdos, 0, sizeof(generated_sdos));
+        canopen_add_pdo_mapping_sdos(slave, generated_sdos, &generated_sdo_count);
+        for (int i = 0; i < generated_sdo_count; i++)
+        {
+            if (canopen_send_sdo_write(runtime, slave->node_id, &generated_sdos[i]))
             {
                 sent_count++;
             }
@@ -1697,29 +1861,6 @@ static int init_runtime_bus(const canopen_bus_config_t *bus, int bus_index)
     return 0;
 }
 
-static void write_json_status(char *out, size_t out_size)
-{
-    if (!out || out_size == 0)
-        return;
-
-    int pending_sdo = 0;
-    for (int i = 0; i < g_runtime_bus_count; i++)
-    {
-        if (g_runtime_buses[i].sdo_transaction.active)
-        {
-            pending_sdo++;
-        }
-    }
-
-    snprintf(out, out_size,
-             "{\n"
-             "  \"bus_count\": %d,\n"
-             "  \"enabled_buses\": %d,\n"
-             "  \"pending_sdo\": %d\n"
-             "}",
-             g_config.bus_count, g_runtime_bus_count, pending_sdo);
-}
-
 int init(void *args)
 {
     if (!args)
@@ -1882,14 +2023,6 @@ void cleanup(void)
     }
     reset_runtime_state();
     canopen_config_free(&g_config);
-}
-
-int get_stats(char *out, size_t out_size)
-{
-    if (!out || out_size == 0)
-        return -1;
-    write_json_status(out, out_size);
-    return 0;
 }
 
 int execute_command(const char *command_json, char *response, size_t response_size)
