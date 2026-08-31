@@ -353,6 +353,38 @@ static void parse_slave(cJSON *item, canopen_slave_config_t *slave, plugin_logge
         slave->node_id = (uint16_t)node_id->valueint;
     }
 
+    snprintf(slave->protection_mode, sizeof(slave->protection_mode), "node_guarding");
+    cJSON *protection_mode = cJSON_GetObjectItem(item, "protection_mode");
+    if (cJSON_IsString(protection_mode) && protection_mode->valuestring &&
+        (strcmp(protection_mode->valuestring, "node_guarding") == 0 ||
+         strcmp(protection_mode->valuestring, "heartbeat_producer") == 0))
+    {
+        copy_string(slave->protection_mode, sizeof(slave->protection_mode),
+                    protection_mode->valuestring);
+    }
+
+    slave->node_guard_time_ms = 500U;
+    cJSON *node_guard_time_ms = cJSON_GetObjectItem(item, "node_guard_time_ms");
+    if (cJSON_IsNumber(node_guard_time_ms) && node_guard_time_ms->valueint > 0)
+    {
+        slave->node_guard_time_ms = (uint32_t)node_guard_time_ms->valueint;
+    }
+
+    slave->node_guard_life_factor = 3U;
+    cJSON *node_guard_life_factor = cJSON_GetObjectItem(item, "node_guard_life_factor");
+    if (cJSON_IsNumber(node_guard_life_factor) && node_guard_life_factor->valueint > 0)
+    {
+        slave->node_guard_life_factor = (uint8_t)node_guard_life_factor->valueint;
+    }
+
+    slave->heartbeat_producer_time_ms = 200U;
+    cJSON *heartbeat_producer_time_ms =
+        cJSON_GetObjectItem(item, "heartbeat_producer_time_ms");
+    if (cJSON_IsNumber(heartbeat_producer_time_ms) && heartbeat_producer_time_ms->valueint > 0)
+    {
+        slave->heartbeat_producer_time_ms = (uint32_t)heartbeat_producer_time_ms->valueint;
+    }
+
     cJSON *od_entries = cJSON_GetObjectItem(item, "od_entries");
     if (cJSON_IsArray(od_entries))
     {

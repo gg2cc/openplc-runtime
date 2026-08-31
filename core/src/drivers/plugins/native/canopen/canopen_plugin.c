@@ -22,10 +22,10 @@
 #define CO_CONFIG_FIFO (CO_CONFIG_FIFO_ENABLE | CO_CONFIG_GLOBAL_FLAG_TIMERNEXT)
 #endif
 
+#include "OD.h"
 #include "libs/CANopenLinux/CO_epoll_interface.h"
 #include "libs/CANopenNode/301/CO_ODinterface.h"
 #include "libs/CANopenNode/CANopen.h"
-#include "OD.h"
 #include "plugin_logger.h"
 #include <linux/can.h>
 #include <pthread.h>
@@ -73,6 +73,7 @@ typedef struct
     bool reconnect_required;
     bool bootup_seen;
     bool startup_sdo_sent;
+    bool startup_reset_sent;
     uint8_t node_id;
     uint32_t bitrate;
     uint32_t last_start_ms;
@@ -89,6 +90,8 @@ static int canopen_parse_iec_address(const char *address, char *prefix, size_t p
                                      int *index, int *bit);
 static void canopen_send_configured_sdos(const canopen_bus_config_t *bus,
                                          canopen_runtime_bus_t *runtime);
+static bool canopen_has_node_guarding_slaves(const canopen_bus_config_t *bus);
+static bool canopen_configure_node_guarding(const canopen_bus_config_t *bus, CO_t *co);
 
 static plugin_runtime_args_t g_args;
 static plugin_logger_t g_logger;
@@ -145,12 +148,19 @@ static void canopen_apply_heartbeat_defaults(const canopen_bus_config_t *bus, CO
         if (enabled_count < OD_CNT_ARR_1016)
         {
             uint16_t slave_heartbeat_ms = 0U;
-            for (int i = 0; i < slave->sdo_count; i++)
+            if (strcmp(slave->protection_mode, "heartbeat_producer") == 0)
             {
-                if (slave->sdo[i].index == 0x1017U && slave->sdo[i].sub_index == 0U)
+                slave_heartbeat_ms = (uint16_t)slave->heartbeat_producer_time_ms;
+            }
+            else
+            {
+                for (int i = 0; i < slave->sdo_count; i++)
                 {
-                    slave_heartbeat_ms = (uint16_t)slave->sdo[i].default_value;
-                    break;
+                    if (slave->sdo[i].index == 0x1017U && slave->sdo[i].sub_index == 0U)
+                    {
+                        slave_heartbeat_ms = (uint16_t)slave->sdo[i].default_value;
+                        break;
+                    }
                 }
             }
             if (slave_heartbeat_ms == 0U)
@@ -163,16 +173,16 @@ static void canopen_apply_heartbeat_defaults(const canopen_bus_config_t *bus, CO
 
             /* Each 0x1016 entry stores the node ID in bits 31..16 and the heartbeat timeout
              * in milliseconds in bits 15..0. */
-            uint16_t consumer_timeout_ms = (uint16_t)((slave_heartbeat_ms * 3U) / 2U);
+            uint16_t consumer_timeout_ms = (uint16_t)(slave_heartbeat_ms * 2U);
             OD_PERSIST_COMM.x1016_consumerHeartbeatTime[enabled_count] =
                 (((uint32_t)slave->node_id << 16U) | (uint32_t)consumer_timeout_ms);
-            plugin_logger_info(&g_logger,
-                               "CANopen heartbeat: consumer_timeout_ms=%u slave_producer_ms=%u node_id=%u "
-                               "bus=%s",
-                               consumer_timeout_ms, slave_heartbeat_ms, slave->node_id,
-                               bus->name);
+            plugin_logger_info(
+                &g_logger,
+                "CANopen heartbeat: consumer_timeout_ms=%u slave_producer_ms=%u node_id=%u "
+                "bus=%s",
+                consumer_timeout_ms, slave_heartbeat_ms, slave->node_id, bus->name);
+            enabled_count++;
         }
-        enabled_count++;
     }
     OD_PERSIST_COMM.x1016_consumerHeartbeatTime_sub0 = enabled_count;
 
@@ -184,6 +194,71 @@ static void canopen_apply_heartbeat_defaults(const canopen_bus_config_t *bus, CO
     {
         co->NMT->HBproducerTime_us = (uint32_t)heartbeat_ms * 1000U;
     }
+}
+
+static bool canopen_has_node_guarding_slaves(const canopen_bus_config_t *bus)
+{
+    if (bus == NULL)
+    {
+        return false;
+    }
+
+    for (int i = 0; i < bus->slave_count; i++)
+    {
+        const canopen_slave_config_t *slave = &bus->slaves[i];
+        if (slave->enabled && strcmp(slave->protection_mode, "heartbeat_producer") != 0)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool canopen_configure_node_guarding(const canopen_bus_config_t *bus, CO_t *co)
+{
+    if (!canopen_has_node_guarding_slaves(bus))
+    {
+        return true;
+    }
+
+    if (co == NULL || co->NGmaster == NULL)
+    {
+        plugin_logger_error(&g_logger, "CANopen node guarding master unavailable for bus=%s",
+                            bus->name);
+        return false;
+    }
+
+    uint8_t index = 0U;
+    for (int i = 0; i < bus->slave_count; i++)
+    {
+        const canopen_slave_config_t *slave = &bus->slaves[i];
+        if (!slave->enabled || strcmp(slave->protection_mode, "heartbeat_producer") == 0 ||
+            slave->node_id == 0U || slave->node_id > 127U)
+        {
+            continue;
+        }
+
+        if (index >= CO_CONFIG_NODE_GUARDING_MASTER_COUNT)
+        {
+            plugin_logger_error(&g_logger, "Too many node guarding slaves configured for bus=%s",
+                                bus->name);
+            return false;
+        }
+
+        CO_ReturnError_t err = CO_nodeGuardingMaster_initNode(co->NGmaster, index, slave->node_id,
+                                                              (uint16_t)slave->node_guard_time_ms);
+        if (err != CO_ERROR_NO)
+        {
+            plugin_logger_error(&g_logger, "Node guarding init failed for bus=%s node_id=%u err=%d",
+                                bus->name, slave->node_id, err);
+            return false;
+        }
+        plugin_logger_info(&g_logger,
+                           "Node guarding master configured: bus=%s node_id=%u guard_time_ms=%u",
+                           bus->name, slave->node_id, slave->node_guard_time_ms);
+        index++;
+    }
+    return true;
 }
 
 static void canopen_hb_state_changed(uint8_t nodeId, uint8_t idx, CO_NMT_internalState_t state,
@@ -203,6 +278,8 @@ static void canopen_hb_state_changed(uint8_t nodeId, uint8_t idx, CO_NMT_interna
         runtime->bootup_seen        = true;
         runtime->reconnect_required = true;
         runtime->startup_confirmed  = false;
+        runtime->startup_sdo_sent   = false;
+        runtime->startup_reset_sent = false;
         runtime->last_bootup_ms     = runtime->last_heartbeat_ms;
         plugin_logger_warn(
             &g_logger,
@@ -225,6 +302,8 @@ static void canopen_hb_state_changed(uint8_t nodeId, uint8_t idx, CO_NMT_interna
     {
         runtime->startup_confirmed  = false;
         runtime->reconnect_required = true;
+        runtime->startup_sdo_sent   = false;
+        runtime->startup_reset_sent = false;
         plugin_logger_warn(&g_logger, "CANopen lifecycle: node %u not operational yet (state=%d)",
                            nodeId, state);
     }
@@ -233,12 +312,62 @@ static void canopen_hb_state_changed(uint8_t nodeId, uint8_t idx, CO_NMT_interna
 static void canopen_runtime_lifecycle_tick(const canopen_bus_config_t *bus,
                                            canopen_runtime_bus_t *runtime)
 {
-    if (bus == NULL || runtime == NULL || runtime->co == NULL || runtime->co->HBcons == NULL)
+    if (bus == NULL || runtime == NULL || runtime->co == NULL)
     {
         return;
     }
 
-    bool any_operational = false;
+#if ((CO_CONFIG_NODE_GUARDING) & CO_CONFIG_NODE_GUARDING_MASTER_ENABLE) != 0
+    if (canopen_has_node_guarding_slaves(bus) && runtime->co->NGmaster != NULL)
+    {
+        if (runtime->co->NGmaster->allMonitoredOperational)
+        {
+            runtime->startup_confirmed  = true;
+            runtime->reconnect_required = false;
+            runtime->retry_count        = 0U;
+        }
+        else if (runtime->startup_confirmed)
+        {
+            runtime->startup_confirmed  = false;
+            runtime->reconnect_required = true;
+            runtime->startup_sdo_sent   = false;
+            runtime->startup_reset_sent = false;
+            plugin_logger_warn(&g_logger,
+                               "CANopen lifecycle: node guarding lost operational state on bus=%s; "
+                               "scheduling reconnect...",
+                               bus->name);
+        }
+        else if (!runtime->reconnect_required)
+        {
+            uint32_t now_ms = canopen_now_ms();
+            if (runtime->last_start_ms > 0U && (now_ms - runtime->last_start_ms) > 5000U)
+            {
+                runtime->reconnect_required = true;
+                runtime->startup_sdo_sent   = false;
+                runtime->startup_reset_sent = false;
+                plugin_logger_warn(&g_logger,
+                                   "CANopen lifecycle: node guarding startup timeout on bus=%s; "
+                                   "retrying start",
+                                   bus->name);
+            }
+        }
+        return;
+    }
+#endif
+
+    if (runtime->co->HBcons == NULL)
+    {
+        return;
+    }
+
+    if (runtime->co->HBcons->numberOfMonitoredNodes == 0U)
+    {
+        runtime->startup_confirmed  = true;
+        runtime->reconnect_required = false;
+        return;
+    }
+
+    bool all_operational = true;
     bool any_bootup      = false;
     bool any_timeout     = false;
     uint32_t now_ms      = canopen_now_ms();
@@ -253,45 +382,73 @@ static void canopen_runtime_lifecycle_tick(const canopen_bus_config_t *bus,
 
         if (node->HBstate == CO_HBconsumer_TIMEOUT)
         {
-            any_timeout = true;
+            any_timeout     = true;
+            all_operational = false;
         }
         if (node->NMTstate == CO_NMT_INITIALIZING)
         {
-            any_bootup = true;
+            any_bootup      = true;
+            all_operational = false;
         }
-        if (node->NMTstate == CO_NMT_OPERATIONAL)
+        if (node->NMTstate != CO_NMT_OPERATIONAL)
         {
-            any_operational = true;
+            all_operational = false;
         }
     }
 
     if (any_bootup)
     {
-        if (runtime->startup_confirmed)
+        if (runtime->startup_confirmed || !runtime->reconnect_required)
         {
-            runtime->startup_sdo_sent = false;
+            plugin_logger_warn(
+                &g_logger,
+                "CANopen lifecycle: boot-up detected on bus=%s (slave in Pre-Operational), "
+                "restarting start sequence...",
+                bus->name);
         }
         runtime->bootup_seen        = true;
         runtime->reconnect_required = true;
         runtime->startup_confirmed  = false;
         runtime->startup_sdo_sent   = false;
+        runtime->startup_reset_sent = false;
         runtime->last_bootup_ms     = now_ms;
     }
     if (any_timeout)
     {
         if (runtime->startup_confirmed)
         {
-            runtime->startup_sdo_sent = false;
+            runtime->startup_confirmed  = false;
+            runtime->reconnect_required = true;
+            runtime->startup_sdo_sent   = false;
+            runtime->startup_reset_sent = false;
+            runtime->retry_count++;
+            plugin_logger_warn(
+                &g_logger,
+                "CANopen lifecycle: heartbeat timeout on bus=%s; scheduling reconnect...",
+                bus->name);
         }
-        runtime->reconnect_required = true;
-        runtime->startup_confirmed  = false;
-        runtime->retry_count++;
-        plugin_logger_warn(&g_logger,
-                           "CANopen lifecycle: heartbeat timeout on bus=%s; scheduling reconnect",
-                           bus->name);
+        else if (!runtime->reconnect_required)
+        {
+            if (runtime->last_start_ms > 0U && (now_ms - runtime->last_start_ms) > 3000U)
+            {
+                runtime->reconnect_required = true;
+                runtime->startup_sdo_sent   = false;
+                runtime->startup_reset_sent = false;
+                plugin_logger_warn(
+                    &g_logger,
+                    "CANopen lifecycle: heartbeat timeout recovery failed on bus=%s; retrying...",
+                    bus->name);
+            }
+        }
     }
-    if (any_operational)
+    if (all_operational && !any_timeout && !any_bootup)
     {
+        if (!runtime->startup_confirmed)
+        {
+            plugin_logger_info(
+                &g_logger, "CANopen lifecycle: all monitored nodes confirmed Operational on bus=%s",
+                bus->name);
+        }
         runtime->startup_confirmed  = true;
         runtime->reconnect_required = false;
         runtime->retry_count        = 0U;
@@ -311,12 +468,87 @@ static void canopen_start_configured_slaves(const canopen_bus_config_t *bus, CO_
     {
         return;
     }
+    if (runtime != NULL && runtime->last_start_ms != 0U && !runtime->reconnect_required)
+    {
+        return;
+    }
     if (runtime != NULL && runtime->last_start_ms != 0U &&
         (now_ms - runtime->last_start_ms) < 1000U)
     {
         return;
     }
 
+    plugin_logger_info(&g_logger,
+                       "CANopen standard start sequence initiating for bus=%s (recovery_count=%u)",
+                       bus->name, runtime->retry_count + 1);
+
+    /* Step 0: Reset the slave first to ensure a clean power-on or restart state (NMT 0x81). */
+    if (!runtime->startup_reset_sent)
+    {
+        bool reset_sent = false;
+        for (int s = 0; s < bus->slave_count; s++)
+        {
+            const canopen_slave_config_t *slave = &bus->slaves[s];
+            if (!slave->enabled || slave->node_id == 0U || slave->node_id > 127U)
+            {
+                continue;
+            }
+
+            pthread_mutex_lock(&runtime->stack_mutex);
+            CO_ReturnError_t err = CO_NMT_sendCommand(co->NMT, CO_NMT_RESET_NODE, slave->node_id);
+            pthread_mutex_unlock(&runtime->stack_mutex);
+            if (err == CO_ERROR_NO)
+            {
+                reset_sent = true;
+                plugin_logger_info(&g_logger,
+                                   "NMT Reset Node sent: bus=%s slave=%s node_id=%u command=0x81",
+                                   bus->name, slave->name, slave->node_id);
+            }
+        }
+
+        runtime->startup_reset_sent = true;
+        if (reset_sent)
+        {
+            usleep(50000U);
+        }
+    }
+
+    /* Step 1: Standard CANopen sequence: Ensure slave is in Pre-Operational state (NMT 0x80) */
+    for (int s = 0; s < bus->slave_count; s++)
+    {
+        const canopen_slave_config_t *slave = &bus->slaves[s];
+        if (!slave->enabled || slave->node_id == 0U || slave->node_id > 127U)
+        {
+            continue;
+        }
+
+        pthread_mutex_lock(&runtime->stack_mutex);
+        CO_ReturnError_t err =
+            CO_NMT_sendCommand(co->NMT, CO_NMT_ENTER_PRE_OPERATIONAL, slave->node_id);
+        pthread_mutex_unlock(&runtime->stack_mutex);
+        if (err == CO_ERROR_NO)
+        {
+            plugin_logger_info(
+                &g_logger,
+                "NMT Enter Pre-Operational sent: bus=%s slave=%s node_id=%u command=0x80",
+                bus->name, slave->name, slave->node_id);
+        }
+    }
+
+    /* Small pause to allow slave to process transition to Pre-Operational before sending SDOs */
+    usleep(30000U);
+
+    /* Step 2: Configure SDOs while slave is in Pre-Operational state */
+    if (!runtime->startup_sdo_sent)
+    {
+        canopen_send_configured_sdos(bus, runtime);
+        runtime->startup_sdo_sent = true;
+        plugin_logger_info(
+            &g_logger, "Configured SDOs sent in Pre-Operational state: bus=%s recovery_count=%u",
+            bus->name, runtime->retry_count + 1);
+    }
+
+    /* Step 3: Send NMT Start Remote Node (0x01) to enter Operational state */
     uint8_t started = 0U;
     for (int s = 0; s < bus->slave_count; s++)
     {
@@ -332,32 +564,25 @@ static void canopen_start_configured_slaves(const canopen_bus_config_t *bus, CO_
         pthread_mutex_unlock(&runtime->stack_mutex);
         if (err != CO_ERROR_NO)
         {
-            plugin_logger_warn(&g_logger, "NMT start failed for bus=%s slave=%s node_id=%u err=%d",
+            plugin_logger_warn(&g_logger, "NMT Start failed for bus=%s slave=%s node_id=%u err=%d",
                                bus->name, slave->name, slave->node_id, err);
             continue;
         }
 
         started++;
-        runtime->last_start_ms      = now_ms;
-        runtime->startup_confirmed  = false;
-        runtime->reconnect_required = false;
-        runtime->retry_count++;
-        plugin_logger_info(&g_logger, "NMT start sent: bus=%s slave=%s node_id=%u command=0x%02X",
-                           bus->name, slave->name, slave->node_id, CO_NMT_ENTER_OPERATIONAL);
+        plugin_logger_info(&g_logger, "NMT Start sent: bus=%s slave=%s node_id=%u command=0x01",
+                           bus->name, slave->name, slave->node_id);
     }
+
+    runtime->last_start_ms      = now_ms;
+    runtime->reconnect_required = false;
+    runtime->retry_count++;
+    runtime->startup_reset_sent = true;
 
     if (started == 0U)
     {
         plugin_logger_warn(&g_logger, "No configured CANopen slave nodes were started for bus=%s",
                            bus->name);
-    }
-    else if (!runtime->startup_sdo_sent)
-    {
-        canopen_send_configured_sdos(bus, runtime);
-        runtime->startup_sdo_sent = true;
-        plugin_logger_info(&g_logger,
-                           "Configured SDOs sent after NMT start: bus=%s recovery_count=%u",
-                           bus->name, runtime->retry_count);
     }
 }
 
@@ -1023,7 +1248,8 @@ static bool canopen_encode_sdo_payload(const canopen_sdo_entry_t *entry, uint8_t
     return false;
 }
 
-static bool canopen_send_sdo_write(canopen_runtime_bus_t *runtime, uint8_t node_id, const canopen_sdo_entry_t *entry)
+static bool canopen_send_sdo_write(canopen_runtime_bus_t *runtime, uint8_t node_id,
+                                   const canopen_sdo_entry_t *entry)
 {
     if (runtime == NULL || runtime->co == NULL || runtime->co->SDOclient == NULL || entry == NULL)
     {
@@ -1124,7 +1350,7 @@ static void canopen_send_configured_sdos(const canopen_bus_config_t *bus,
         return;
     }
 
-    /* Give slaves a small pause to process NMT start before issuing SDO writes */
+    /* Give slaves a small pause after entering Pre-Operational state before issuing SDO writes */
     usleep(50000U);
 
     int sent_count = 0;
@@ -1136,10 +1362,80 @@ static void canopen_send_configured_sdos(const canopen_bus_config_t *bus,
             continue;
         }
 
+        canopen_sdo_entry_t protection_sdos[3];
+        int protection_sdo_count = 0;
+        memset(protection_sdos, 0, sizeof(protection_sdos));
+        if (strcmp(slave->protection_mode, "heartbeat_producer") == 0)
+        {
+            snprintf(protection_sdos[0].name, sizeof(protection_sdos[0].name), "guard_time_off");
+            protection_sdos[0].index         = 0x100CU;
+            protection_sdos[0].data_type[0]  = 'u';
+            protection_sdos[0].data_type[1]  = '1';
+            protection_sdos[0].data_type[2]  = '6';
+            protection_sdos[0].default_value = 0;
+
+            snprintf(protection_sdos[1].name, sizeof(protection_sdos[1].name), "life_factor_off");
+            protection_sdos[1].index         = 0x100DU;
+            protection_sdos[1].data_type[0]  = 'u';
+            protection_sdos[1].data_type[1]  = '8';
+            protection_sdos[1].default_value = 0;
+
+            snprintf(protection_sdos[2].name, sizeof(protection_sdos[2].name),
+                     "heartbeat_producer_time");
+            protection_sdos[2].index         = 0x1017U;
+            protection_sdos[2].data_type[0]  = 'u';
+            protection_sdos[2].data_type[1]  = '1';
+            protection_sdos[2].data_type[2]  = '6';
+            protection_sdos[2].default_value = (int32_t)slave->heartbeat_producer_time_ms;
+
+            protection_sdo_count = 3;
+        }
+        else
+        {
+            snprintf(protection_sdos[0].name, sizeof(protection_sdos[0].name),
+                     "heartbeat_producer_off");
+            protection_sdos[0].index         = 0x1017U;
+            protection_sdos[0].data_type[0]  = 'u';
+            protection_sdos[0].data_type[1]  = '1';
+            protection_sdos[0].data_type[2]  = '6';
+            protection_sdos[0].default_value = 0;
+
+            snprintf(protection_sdos[1].name, sizeof(protection_sdos[1].name), "guard_time");
+            protection_sdos[1].index         = 0x100CU;
+            protection_sdos[1].data_type[0]  = 'u';
+            protection_sdos[1].data_type[1]  = '1';
+            protection_sdos[1].data_type[2]  = '6';
+            protection_sdos[1].default_value = (int32_t)slave->node_guard_time_ms;
+
+            snprintf(protection_sdos[2].name, sizeof(protection_sdos[2].name), "life_time_factor");
+            protection_sdos[2].index         = 0x100DU;
+            protection_sdos[2].data_type[0]  = 'u';
+            protection_sdos[2].data_type[1]  = '8';
+            protection_sdos[2].default_value = slave->node_guard_life_factor;
+
+            protection_sdo_count = 3;
+        }
+
+        for (int i = 0; i < protection_sdo_count; i++)
+        {
+            if (canopen_send_sdo_write(runtime, slave->node_id, &protection_sdos[i]))
+            {
+                sent_count++;
+            }
+        }
+
         for (int i = 0; i < slave->sdo_count; i++)
         {
             const canopen_sdo_entry_t *entry = &slave->sdo[i];
             if (entry->index == 0U)
+            {
+                continue;
+            }
+
+            if ((strcmp(slave->protection_mode, "heartbeat_producer") == 0 &&
+                 (entry->index == 0x100CU || entry->index == 0x100DU)) ||
+                (strcmp(slave->protection_mode, "heartbeat_producer") != 0 &&
+                 entry->index == 0x1017U))
             {
                 continue;
             }
@@ -1362,6 +1658,14 @@ static int init_runtime_bus(const canopen_bus_config_t *bus, int bus_index)
     plugin_logger_info(&g_logger, "CANopen init sequence: step=CAN_normal_mode bus=%s if=%s fd=%d",
                        bus->name, bus->interface, g_runtime_buses[bus_index].fd);
 
+    if (!canopen_configure_node_guarding(bus, co))
+    {
+        CO_delete(co);
+        g_runtime_buses[bus_index].co          = NULL;
+        g_runtime_buses[bus_index].initialized = false;
+        return -1;
+    }
+
     if (g_runtime_buses[bus_index].fd >= 0)
     {
         /* Use the CANopenLinux mainloop pattern: one epoll instance, initialized once,
@@ -1510,17 +1814,23 @@ void cycle_end(void)
 
         if (g_runtime_buses[i].initialized && g_runtime_buses[i].co != NULL)
         {
+            pthread_mutex_lock(&g_runtime_buses[i].stack_mutex);
             canopen_runtime_lifecycle_tick(bus, &g_runtime_buses[i]);
-            if (g_runtime_buses[i].reconnect_required || !g_runtime_buses[i].startup_confirmed)
+            pthread_mutex_unlock(&g_runtime_buses[i].stack_mutex);
+
+            bool needs_start =
+                g_runtime_buses[i].reconnect_required || !g_runtime_buses[i].startup_confirmed;
+            if (needs_start)
             {
                 canopen_start_configured_slaves(bus, g_runtime_buses[i].co, &g_runtime_buses[i]);
             }
 
-            /* Thin adapter phase: keep PLC↔PDO translation, but do not run a
-             * custom SDO transaction loop. The Linux CANopen runtime handles the
-             * protocol processing itself in the worker thread. */
-            sync_plc_image_to_canopen(bus);
-            sync_canopen_bus_to_plc_image(bus);
+            /* Exchange PDO process image when slave node(s) are confirmed in Operational state */
+            if (g_runtime_buses[i].startup_confirmed)
+            {
+                sync_plc_image_to_canopen(bus);
+                sync_canopen_bus_to_plc_image(bus);
+            }
         }
     }
 }

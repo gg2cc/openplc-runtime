@@ -71,6 +71,10 @@ extern "C"
         char name[MAX_CANOPEN_NAME_LEN];
         bool enabled;
         uint16_t node_id;
+        char protection_mode[24];
+        uint32_t node_guard_time_ms;
+        uint8_t node_guard_life_factor;
+        uint32_t heartbeat_producer_time_ms;
         int od_entry_count;
         canopen_od_entry_t od_entries[MAX_CANOPEN_OD_ENTRIES];
         int tpdo_count;
