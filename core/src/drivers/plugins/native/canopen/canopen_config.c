@@ -43,6 +43,23 @@ static void copy_string(char *dst, size_t dst_size, const char *src)
     dst[len] = '\0';
 }
 
+static uint16_t canopen_data_type_bit_length(const char *data_type)
+{
+    if (!data_type || data_type[0] == '\0' || strcasecmp(data_type, "bool") == 0)
+        return 1U;
+    if (strcasecmp(data_type, "i8") == 0 || strcasecmp(data_type, "u8") == 0)
+        return 8U;
+    if (strcasecmp(data_type, "i16") == 0 || strcasecmp(data_type, "u16") == 0)
+        return 16U;
+    if (strcasecmp(data_type, "i32") == 0 || strcasecmp(data_type, "u32") == 0 ||
+        strcasecmp(data_type, "f32") == 0)
+        return 32U;
+    if (strcasecmp(data_type, "i64") == 0 || strcasecmp(data_type, "u64") == 0 ||
+        strcasecmp(data_type, "f64") == 0)
+        return 64U;
+    return 0U;
+}
+
 static void parse_od_entry(cJSON *item, canopen_od_entry_t *entry, plugin_logger_t *logger)
 {
     if (!item || !entry)
@@ -169,12 +186,6 @@ static void parse_pdo_mapping(cJSON *item, canopen_pdo_mapping_t *mapping)
         mapping->sub_index = (uint8_t)sub_index->valueint;
     }
 
-    cJSON *bit_length = cJSON_GetObjectItem(item, "bit_length");
-    if (cJSON_IsNumber(bit_length))
-    {
-        mapping->bit_length = (uint16_t)bit_length->valueint;
-    }
-
     cJSON *data_type = cJSON_GetObjectItem(item, "data_type");
     if (cJSON_IsString(data_type) && data_type->valuestring)
     {
@@ -183,6 +194,26 @@ static void parse_pdo_mapping(cJSON *item, canopen_pdo_mapping_t *mapping)
 
     parse_binding_fields(item, mapping->plc_address, sizeof(mapping->plc_address),
                          mapping->direction, sizeof(mapping->direction));
+
+    if (mapping->data_type[0] == '\0')
+    {
+        if (strncasecmp(mapping->plc_address, "%IX", 3) == 0 ||
+            strncasecmp(mapping->plc_address, "%QX", 3) == 0)
+            copy_string(mapping->data_type, sizeof(mapping->data_type), "bool");
+        else if (strncasecmp(mapping->plc_address, "%IB", 3) == 0 ||
+                 strncasecmp(mapping->plc_address, "%QB", 3) == 0)
+            copy_string(mapping->data_type, sizeof(mapping->data_type), "u8");
+        else if (strncasecmp(mapping->plc_address, "%IW", 3) == 0 ||
+                 strncasecmp(mapping->plc_address, "%QW", 3) == 0)
+            copy_string(mapping->data_type, sizeof(mapping->data_type), "u16");
+        else if (strncasecmp(mapping->plc_address, "%ID", 3) == 0 ||
+                 strncasecmp(mapping->plc_address, "%QD", 3) == 0)
+            copy_string(mapping->data_type, sizeof(mapping->data_type), "u32");
+        else if (strncasecmp(mapping->plc_address, "%IL", 3) == 0 ||
+                 strncasecmp(mapping->plc_address, "%QL", 3) == 0)
+            copy_string(mapping->data_type, sizeof(mapping->data_type), "u64");
+    }
+    mapping->bit_length = canopen_data_type_bit_length(mapping->data_type);
     mapping->bound = (mapping->plc_address[0] != '\0' && mapping->direction[0] != '\0');
 }
 

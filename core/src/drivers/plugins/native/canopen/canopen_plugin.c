@@ -70,6 +70,88 @@ typedef struct
 
 typedef struct canopen_runtime_bus_s canopen_runtime_bus_t;
 
+typedef enum
+{
+    CANOPEN_DATA_TYPE_INVALID = 0,
+    CANOPEN_DATA_TYPE_BOOL,
+    CANOPEN_DATA_TYPE_I8,
+    CANOPEN_DATA_TYPE_U8,
+    CANOPEN_DATA_TYPE_I16,
+    CANOPEN_DATA_TYPE_U16,
+    CANOPEN_DATA_TYPE_I32,
+    CANOPEN_DATA_TYPE_U32,
+    CANOPEN_DATA_TYPE_I64,
+    CANOPEN_DATA_TYPE_U64,
+    CANOPEN_DATA_TYPE_F32,
+    CANOPEN_DATA_TYPE_F64
+} canopen_data_type_t;
+
+static canopen_data_type_t canopen_parse_data_type(const char *data_type)
+{
+    if (!data_type || data_type[0] == '\0' || strcasecmp(data_type, "bool") == 0)
+        return CANOPEN_DATA_TYPE_BOOL;
+    if (strcasecmp(data_type, "i8") == 0)
+        return CANOPEN_DATA_TYPE_I8;
+    if (strcasecmp(data_type, "u8") == 0)
+        return CANOPEN_DATA_TYPE_U8;
+    if (strcasecmp(data_type, "i16") == 0)
+        return CANOPEN_DATA_TYPE_I16;
+    if (strcasecmp(data_type, "u16") == 0)
+        return CANOPEN_DATA_TYPE_U16;
+    if (strcasecmp(data_type, "i32") == 0)
+        return CANOPEN_DATA_TYPE_I32;
+    if (strcasecmp(data_type, "u32") == 0)
+        return CANOPEN_DATA_TYPE_U32;
+    if (strcasecmp(data_type, "i64") == 0)
+        return CANOPEN_DATA_TYPE_I64;
+    if (strcasecmp(data_type, "u64") == 0)
+        return CANOPEN_DATA_TYPE_U64;
+    if (strcasecmp(data_type, "f32") == 0)
+        return CANOPEN_DATA_TYPE_F32;
+    if (strcasecmp(data_type, "f64") == 0)
+        return CANOPEN_DATA_TYPE_F64;
+    return CANOPEN_DATA_TYPE_INVALID;
+}
+
+static uint16_t canopen_data_type_bit_length(canopen_data_type_t data_type)
+{
+    switch (data_type)
+    {
+    case CANOPEN_DATA_TYPE_BOOL:
+        return 1U;
+    case CANOPEN_DATA_TYPE_I8:
+    case CANOPEN_DATA_TYPE_U8:
+        return 8U;
+    case CANOPEN_DATA_TYPE_I16:
+    case CANOPEN_DATA_TYPE_U16:
+        return 16U;
+    case CANOPEN_DATA_TYPE_I32:
+    case CANOPEN_DATA_TYPE_U32:
+    case CANOPEN_DATA_TYPE_F32:
+        return 32U;
+    case CANOPEN_DATA_TYPE_I64:
+    case CANOPEN_DATA_TYPE_U64:
+    case CANOPEN_DATA_TYPE_F64:
+        return 64U;
+    default:
+        return 0U;
+    }
+}
+
+static uint64_t canopen_normalize_value(uint64_t value, canopen_data_type_t data_type)
+{
+    uint16_t bit_length = canopen_data_type_bit_length(data_type);
+    bool is_signed      = data_type == CANOPEN_DATA_TYPE_I8 || data_type == CANOPEN_DATA_TYPE_I16 ||
+                          data_type == CANOPEN_DATA_TYPE_I32 || data_type == CANOPEN_DATA_TYPE_I64;
+
+    if (is_signed && bit_length > 0U && bit_length < 64U &&
+        (value & ((uint64_t)1U << (bit_length - 1U))) != 0U)
+    {
+        value |= ~(((uint64_t)1U << bit_length) - 1U);
+    }
+    return value;
+}
+
 typedef struct
 {
     bool valid;
@@ -78,6 +160,7 @@ typedef struct
     uint16_t plc_index;
     uint8_t plc_bit;
     uint8_t plc_type;
+    canopen_data_type_t data_type;
 } canopen_input_binding_t;
 
 typedef struct
@@ -88,6 +171,7 @@ typedef struct
     uint16_t plc_index;
     uint8_t plc_bit;
     uint8_t plc_type;
+    canopen_data_type_t data_type;
 } canopen_output_field_t;
 
 typedef struct
@@ -746,8 +830,10 @@ static bool canopen_prepare_input_binding(const canopen_pdo_mapping_t *mapping, 
         plc_type       = 11U;
     }
 
-    uint16_t bit_length = mapping->bit_length != 0U ? mapping->bit_length : default_length;
-    if (bit_length == 0U || bit_length > 64U || (bit_length > 1U && (bit_length & 0x07U) != 0U))
+    canopen_data_type_t data_type = canopen_parse_data_type(mapping->data_type);
+    uint16_t bit_length           = canopen_data_type_bit_length(data_type);
+    if (bit_length == 0U || bit_length > default_length ||
+        (bit_length > 1U && (bit_length & 0x07U) != 0U))
     {
         return false;
     }
@@ -758,6 +844,7 @@ static bool canopen_prepare_input_binding(const canopen_pdo_mapping_t *mapping, 
     binding->plc_index  = (uint16_t)iec_index;
     binding->plc_bit    = (uint8_t)iec_bit;
     binding->plc_type   = plc_type;
+    binding->data_type  = data_type;
     return true;
 }
 
@@ -804,7 +891,9 @@ static void canopen_rpdo_signal_pre(void *object)
             continue;
         }
 
-        uint64_t value = canopen_read_rpdo_bits(payload, binding->bit_offset, binding->bit_length);
+        uint64_t value = canopen_normalize_value(
+            canopen_read_rpdo_bits(payload, binding->bit_offset, binding->bit_length),
+            binding->data_type);
         switch (binding->plc_type)
         {
         case 0U:
@@ -991,8 +1080,10 @@ static bool canopen_prepare_output_binding(const canopen_pdo_mapping_t *mapping,
         plc_type       = 11U;
     }
 
-    uint16_t bit_length = mapping->bit_length != 0U ? mapping->bit_length : default_length;
-    if (bit_length == 0U || bit_length > 64U || (bit_length > 1U && (bit_length & 0x07U) != 0U))
+    canopen_data_type_t data_type = canopen_parse_data_type(mapping->data_type);
+    uint16_t bit_length           = canopen_data_type_bit_length(data_type);
+    if (bit_length == 0U || bit_length > default_length ||
+        (bit_length > 1U && (bit_length & 0x07U) != 0U))
     {
         return false;
     }
@@ -1003,6 +1094,7 @@ static bool canopen_prepare_output_binding(const canopen_pdo_mapping_t *mapping,
     binding->plc_index  = (uint16_t)iec_index;
     binding->plc_bit    = (uint8_t)iec_bit;
     binding->plc_type   = plc_type;
+    binding->data_type  = data_type;
     return true;
 }
 
@@ -1690,7 +1782,7 @@ static void canopen_add_pdo_mapping_sdos(const canopen_slave_config_t *slave,
         entries[count].sub_index     = 2U;
         entries[count].data_type[0]  = 'u';
         entries[count].data_type[1]  = '8';
-        entries[count].default_value = 0xFF; // the transmission type of the RPDO
+        entries[count].default_value = 0xFE; // the transmission type of the RPDO
         count++;
 
         snprintf(entries[count].name, sizeof(entries[count].name), "rpdo_%d_inhibit_time", p + 1);
@@ -1773,7 +1865,7 @@ static void canopen_add_pdo_mapping_sdos(const canopen_slave_config_t *slave,
         entries[count].sub_index     = 2U;
         entries[count].data_type[0]  = 'u';
         entries[count].data_type[1]  = '8';
-        entries[count].default_value = 0xFF; // the transmission type of the TPDO
+        entries[count].default_value = 0xFE; // the transmission type of the TPDO
         count++;
 
         snprintf(entries[count].name, sizeof(entries[count].name), "tpdo_%d_inhibit_time", p + 1);
