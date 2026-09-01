@@ -16,24 +16,11 @@ extern "C"
 #endif
 
 #define MAX_CANOPEN_BUSES 8
-#define MAX_CANOPEN_OD_ENTRIES 128
 #define MAX_CANOPEN_PDO_COUNT 16
 #define MAX_CANOPEN_PDO_MAPPING 32
 #define MAX_CANOPEN_SDO_COUNT 32
 #define MAX_CANOPEN_NAME_LEN 64
 #define MAX_CANOPEN_SLAVES 64
-
-    typedef struct
-    {
-        char name[MAX_CANOPEN_NAME_LEN];
-        uint16_t index;
-        uint8_t sub_index;
-        char data_type[16];
-        char access[8];
-        int32_t default_value;
-        char description[MAX_CANOPEN_NAME_LEN];
-        char pdo_map[8];
-    } canopen_od_entry_t;
 
     typedef struct
     {
@@ -75,8 +62,6 @@ extern "C"
         uint32_t node_guard_time_ms;
         uint8_t node_guard_life_factor;
         uint32_t heartbeat_producer_time_ms;
-        int od_entry_count;
-        canopen_od_entry_t od_entries[MAX_CANOPEN_OD_ENTRIES];
         int tpdo_count;
         canopen_pdo_t tpdo[MAX_CANOPEN_PDO_COUNT];
         int rpdo_count;
@@ -99,8 +84,6 @@ extern "C"
         bool auto_bringup;
         uint32_t heartbeat_ms;
         uint32_t sync_period_ms;
-        int od_entry_count;
-        canopen_od_entry_t od_entries[MAX_CANOPEN_OD_ENTRIES];
         int tpdo_count;
         canopen_pdo_t tpdo[MAX_CANOPEN_PDO_COUNT];
         int rpdo_count;

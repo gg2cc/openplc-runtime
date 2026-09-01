@@ -1288,13 +1288,12 @@ static void apply_od_pdo_defaults(const canopen_bus_config_t *bus, canopen_runti
     }
 
     plugin_logger_info(
-        &g_logger, "apply_od_pdo_defaults: bus=%s slave_count=%d bus_od=%d bus_tpdo=%d bus_rpdo=%d",
-        bus->name, bus->slave_count, bus->od_entry_count, bus->tpdo_count, bus->rpdo_count);
+        &g_logger, "apply_od_pdo_defaults: bus=%s slave_count=%d bus_tpdo=%d bus_rpdo=%d",
+        bus->name, bus->slave_count, bus->tpdo_count, bus->rpdo_count);
 
     const uint16_t local_node_id = bus->local_node_id > 0U ? bus->local_node_id : 0x7FU;
 
-    /* Runtime uses the generated OD.c defaults as the source of truth. JSON od_entries are
-     * editor metadata only. A slave TPDO is received by the master through a local RPDO. */
+    /* Runtime uses the generated OD.c defaults as the source of truth. */
     OD_PERSIST_COMM.x1018_identity.vendor_ID      = (uint32_t)local_node_id;
     OD_PERSIST_COMM.x1018_identity.productCode    = (uint32_t)bus->bitrate;
     OD_PERSIST_COMM.x1018_identity.revisionNumber = bus->heartbeat_ms;
@@ -2044,8 +2043,8 @@ static int init_runtime_bus(const canopen_bus_config_t *bus, int bus_index)
         const canopen_slave_config_t *slave = &bus->slaves[s];
         plugin_logger_info(
             &g_logger,
-            "Bus[%d] slave[%d]: name=%s node_id=%u enabled=%d od_entries=%d tpdo=%d rpdo=%d sdo=%d",
-            bus_index, s, slave->name, slave->node_id, slave->enabled, slave->od_entry_count,
+            "Bus[%d] slave[%d]: name=%s node_id=%u enabled=%d tpdo=%d rpdo=%d sdo=%d",
+            bus_index, s, slave->name, slave->node_id, slave->enabled,
             slave->tpdo_count, slave->rpdo_count, slave->sdo_count);
         for (int i = 0; i < slave->tpdo_count; i++)
         {
@@ -2271,9 +2270,9 @@ static int init_runtime_bus(const canopen_bus_config_t *bus, int bus_index)
 
     plugin_logger_info(&g_logger,
                        "CANopen runtime bound: bus=%s interface=%s local_node_id=%u bitrate=%u "
-                       "od_entries=%d tpdo=%d rpdo=%d socket_fd=%d",
+                         "tpdo=%d rpdo=%d socket_fd=%d",
                        bus->name, bus->interface, bus->local_node_id, bus->bitrate,
-                       bus->od_entry_count, bus->tpdo_count, bus->rpdo_count,
+                         bus->tpdo_count, bus->rpdo_count,
                        g_runtime_buses[bus_index].fd);
     return 0;
 }
@@ -2340,9 +2339,9 @@ int start_loop(void)
         }
         plugin_logger_info(&g_logger,
                            "Bus[%d]: name=%s interface=%s local_node_id=%u bitrate=%u "
-                           "od_entries=%d tpdo=%d rpdo=%d",
+                            "tpdo=%d rpdo=%d",
                            i, bus->name, bus->interface, bus->local_node_id, bus->bitrate,
-                           bus->od_entry_count, bus->tpdo_count, bus->rpdo_count);
+                            bus->tpdo_count, bus->rpdo_count);
     }
 
     if (g_runtime_bus_count > 0)

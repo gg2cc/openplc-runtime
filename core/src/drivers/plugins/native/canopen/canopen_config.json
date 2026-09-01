@@ -21,7 +21,6 @@
           "node_guard_time_ms": 500,
           "node_guard_life_factor": 3,
           "heartbeat_producer_time_ms": 500,
-          "od_entries": [],
           "tpdo": [],
           "rpdo": [
             {

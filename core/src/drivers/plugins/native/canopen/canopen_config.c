@@ -60,81 +60,6 @@ static uint16_t canopen_data_type_bit_length(const char *data_type)
     return 0U;
 }
 
-static void parse_od_entry(cJSON *item, canopen_od_entry_t *entry, plugin_logger_t *logger)
-{
-    if (!item || !entry)
-        return;
-    memset(entry, 0, sizeof(*entry));
-
-    cJSON *name = cJSON_GetObjectItem(item, "name");
-    if (cJSON_IsString(name) && name->valuestring)
-    {
-        copy_string(entry->name, sizeof(entry->name), name->valuestring);
-    }
-
-    cJSON *index = cJSON_GetObjectItem(item, "index");
-    if (cJSON_IsString(index) && index->valuestring)
-    {
-        entry->index = parse_u16_literal(index->valuestring);
-    }
-    else if (cJSON_IsNumber(index))
-    {
-        entry->index = (uint16_t)index->valueint;
-    }
-
-    cJSON *sub_index = cJSON_GetObjectItem(item, "sub_index");
-    if (cJSON_IsString(sub_index) && sub_index->valuestring)
-    {
-        entry->sub_index = (uint8_t)parse_u16_literal(sub_index->valuestring);
-    }
-    else if (cJSON_IsNumber(sub_index))
-    {
-        entry->sub_index = (uint8_t)sub_index->valueint;
-    }
-
-    cJSON *data_type = cJSON_GetObjectItem(item, "data_type");
-    if (cJSON_IsString(data_type) && data_type->valuestring)
-    {
-        copy_string(entry->data_type, sizeof(entry->data_type), data_type->valuestring);
-    }
-
-    cJSON *access = cJSON_GetObjectItem(item, "access");
-    if (cJSON_IsString(access) && access->valuestring)
-    {
-        copy_string(entry->access, sizeof(entry->access), access->valuestring);
-    }
-
-    cJSON *default_value = cJSON_GetObjectItem(item, "default_value");
-    if (cJSON_IsNumber(default_value))
-    {
-        entry->default_value = (int32_t)default_value->valueint;
-    }
-    else if (cJSON_IsString(default_value) && default_value->valuestring)
-    {
-        entry->default_value = (int32_t)strtol(default_value->valuestring, NULL, 0);
-    }
-
-    cJSON *description = cJSON_GetObjectItem(item, "description");
-    if (cJSON_IsString(description) && description->valuestring)
-    {
-        copy_string(entry->description, sizeof(entry->description), description->valuestring);
-    }
-
-    cJSON *pdo_map = cJSON_GetObjectItem(item, "pdo_map");
-    if (cJSON_IsString(pdo_map) && pdo_map->valuestring)
-    {
-        copy_string(entry->pdo_map, sizeof(entry->pdo_map), pdo_map->valuestring);
-    }
-
-    if (logger)
-    {
-        plugin_logger_debug(logger, "OD entry: name=%s index=0x%04X sub=%u type=%s pdo_map=%s",
-                            entry->name, entry->index, entry->sub_index,
-                            entry->data_type[0] ? entry->data_type : "u32",
-                            entry->pdo_map[0] ? entry->pdo_map : "none");
-    }
-}
-
 static void parse_binding_fields(cJSON *item, char *plc_address, size_t plc_address_size,
                                  char *direction, size_t direction_size)
 {
@@ -416,20 +341,6 @@ static void parse_slave(cJSON *item, canopen_slave_config_t *slave, plugin_logge
         slave->heartbeat_producer_time_ms = (uint32_t)heartbeat_producer_time_ms->valueint;
     }
 
-    cJSON *od_entries = cJSON_GetObjectItem(item, "od_entries");
-    if (cJSON_IsArray(od_entries))
-    {
-        int total = cJSON_GetArraySize(od_entries);
-        for (int i = 0; i < total && i < MAX_CANOPEN_OD_ENTRIES; i++)
-        {
-            cJSON *entry = cJSON_GetArrayItem(od_entries, i);
-            if (!entry)
-                continue;
-            parse_od_entry(entry, &slave->od_entries[slave->od_entry_count], logger);
-            slave->od_entry_count++;
-        }
-    }
-
     cJSON *tpdo = cJSON_GetObjectItem(item, "tpdo");
     parse_pdo(tpdo, &slave->tpdo_count, slave->tpdo, "tpdo", logger);
 
@@ -458,8 +369,8 @@ static void parse_slave(cJSON *item, canopen_slave_config_t *slave, plugin_logge
     if (logger)
     {
         plugin_logger_debug(logger,
-                            "Slave parsed: name=%s node_id=%u od_entries=%d tpdo=%d rpdo=%d sdo=%d",
-                            slave->name, slave->node_id, slave->od_entry_count, slave->tpdo_count,
+                            "Slave parsed: name=%s node_id=%u tpdo=%d rpdo=%d sdo=%d",
+                            slave->name, slave->node_id, slave->tpdo_count,
                             slave->rpdo_count, slave->sdo_count);
     }
 }
@@ -469,7 +380,6 @@ static void aggregate_bus_counts_from_slaves(canopen_bus_config_t *bus, plugin_l
     if (!bus)
         return;
 
-    bus->od_entry_count = 0;
     bus->tpdo_count     = 0;
     bus->rpdo_count     = 0;
     bus->sdo_count      = 0;
@@ -481,7 +391,6 @@ static void aggregate_bus_counts_from_slaves(canopen_bus_config_t *bus, plugin_l
         {
             continue;
         }
-        bus->od_entry_count += slave->od_entry_count;
         bus->tpdo_count += slave->tpdo_count;
         bus->rpdo_count += slave->rpdo_count;
         bus->sdo_count += slave->sdo_count;
@@ -489,8 +398,8 @@ static void aggregate_bus_counts_from_slaves(canopen_bus_config_t *bus, plugin_l
 
     if (logger)
     {
-        plugin_logger_debug(logger, "Bus aggregate: slaves=%d od_entries=%d tpdo=%d rpdo=%d sdo=%d",
-                            bus->slave_count, bus->od_entry_count, bus->tpdo_count, bus->rpdo_count,
+        plugin_logger_debug(logger, "Bus aggregate: slaves=%d tpdo=%d rpdo=%d sdo=%d",
+                    bus->slave_count, bus->tpdo_count, bus->rpdo_count,
                             bus->sdo_count);
     }
 }
@@ -601,20 +510,6 @@ static void parse_bus(cJSON *item, canopen_bus_config_t *bus, plugin_logger_t *l
         bus->sync_period_ms = (uint32_t)sync_period->valueint;
     }
 
-    cJSON *od_entries = cJSON_GetObjectItem(item, "od_entries");
-    if (cJSON_IsArray(od_entries))
-    {
-        int total = cJSON_GetArraySize(od_entries);
-        for (int i = 0; i < total && i < MAX_CANOPEN_OD_ENTRIES; i++)
-        {
-            cJSON *entry = cJSON_GetArrayItem(od_entries, i);
-            if (!entry)
-                continue;
-            parse_od_entry(entry, &bus->od_entries[bus->od_entry_count], logger);
-            bus->od_entry_count++;
-        }
-    }
-
     cJSON *tpdo = cJSON_GetObjectItem(item, "tpdo");
     parse_pdo(tpdo, &bus->tpdo_count, bus->tpdo, "tpdo", logger);
 
@@ -660,9 +555,9 @@ static void parse_bus(cJSON *item, canopen_bus_config_t *bus, plugin_logger_t *l
     {
         plugin_logger_debug(logger,
                             "CANopen bus parsed: name=%s interface=%s local_node_id=%u bitrate=%u "
-                            "od_entries=%d tpdo=%d rpdo=%d sdo=%d slaves=%d",
+                            "tpdo=%d rpdo=%d sdo=%d slaves=%d",
                             bus->name, bus->interface, bus->local_node_id, bus->bitrate,
-                            bus->od_entry_count, bus->tpdo_count, bus->rpdo_count, bus->sdo_count,
+                            bus->tpdo_count, bus->rpdo_count, bus->sdo_count,
                             bus->slave_count);
     }
 }
