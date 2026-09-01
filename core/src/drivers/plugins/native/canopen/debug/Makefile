@@ -1,0 +1,76 @@
+CANOPEN_ROOT := ..
+HOST_CC ?= /usr/bin/gcc
+CC = $(HOST_CC)
+AR = ar
+STRIP = strip
+
+CPPFLAGS += -I$(CANOPEN_ROOT) \
+	-I$(CANOPEN_ROOT)/../ \
+	-I$(CANOPEN_ROOT)/../../../ \
+	-I$(CANOPEN_ROOT)/../cjson \
+	-I$(CANOPEN_ROOT)/../can \
+	-I$(CANOPEN_ROOT)/../../../drivers \
+	-I$(CANOPEN_ROOT)/libs/CANopenNode \
+	-I$(CANOPEN_ROOT)/libs/CANopenLinux \
+	-DCO_CONFIG_GLOBAL_RT_FLAG_CALLBACK_PRE=0x1000 \
+	-DCO_CONFIG_NMT='(CO_CONFIG_NMT_MASTER | CO_CONFIG_GLOBAL_FLAG_CALLBACK_PRE | CO_CONFIG_GLOBAL_FLAG_TIMERNEXT)' \
+	-DCO_CONFIG_HB_CONS='(CO_CONFIG_HB_CONS_ENABLE | CO_CONFIG_HB_CONS_CALLBACK_CHANGE | CO_CONFIG_GLOBAL_FLAG_CALLBACK_PRE | CO_CONFIG_GLOBAL_FLAG_TIMERNEXT)' \
+	-DCO_CONFIG_NODE_GUARDING='(CO_CONFIG_NODE_GUARDING_MASTER_ENABLE | CO_CONFIG_GLOBAL_FLAG_TIMERNEXT)' \
+	-DCO_CONFIG_PDO='(CO_CONFIG_RPDO_ENABLE | CO_CONFIG_TPDO_ENABLE | CO_CONFIG_RPDO_TIMERS_ENABLE | CO_CONFIG_TPDO_TIMERS_ENABLE | CO_CONFIG_PDO_SYNC_ENABLE | CO_CONFIG_PDO_OD_IO_ACCESS | CO_CONFIG_GLOBAL_RT_FLAG_CALLBACK_PRE | CO_CONFIG_GLOBAL_FLAG_TIMERNEXT | CO_CONFIG_GLOBAL_FLAG_OD_DYNAMIC)' \
+	-DCO_CONFIG_SDO_CLI='(CO_CONFIG_SDO_CLI_ENABLE | CO_CONFIG_SDO_CLI_SEGMENTED | CO_CONFIG_GLOBAL_FLAG_TIMERNEXT)' \
+	-DCO_CONFIG_GTW='(CO_CONFIG_GTW_ASCII | CO_CONFIG_GTW_ASCII_SDO | CO_CONFIG_GTW_ASCII_NMT | CO_CONFIG_GTW_ASCII_LSS | CO_CONFIG_GTW_ASCII_LOG | CO_CONFIG_GTW_ASCII_ERROR_DESC | CO_CONFIG_GTW_ASCII_PRINT_HELP | CO_CONFIG_GTW_ASCII_PRINT_LEDS)' \
+	-DCO_CONFIG_GTW_BLOCK_DL_LOOP=3 \
+	-DCO_CONFIG_GTWA_COMM_BUF_SIZE=2000 \
+	-DCO_CONFIG_GTWA_LOG_BUF_SIZE=10000 \
+	-DCO_CONFIG_FIFO='(CO_CONFIG_FIFO_ENABLE | CO_CONFIG_FIFO_ALT_READ | CO_CONFIG_FIFO_CRC16_CCITT | CO_CONFIG_FIFO_ASCII_COMMANDS | CO_CONFIG_FIFO_ASCII_DATATYPES)'
+
+CFLAGS += -O0 -g -Wall -Wextra -Wno-unused-parameter -Wno-format-truncation -Wno-stringop-overflow
+LDFLAGS += -lpthread
+
+TARGET        = libcanopen_plugin.so
+DEBUG_TARGET  = canopen_debug
+SOURCES       = $(CANOPEN_ROOT)/canopen_plugin.c \
+	$(CANOPEN_ROOT)/canopen_config.c \
+	$(CANOPEN_ROOT)/OD.c \
+	$(CANOPEN_ROOT)/../plugin_logger.c \
+	$(CANOPEN_ROOT)/../cjson/cJSON.c \
+	$(CANOPEN_ROOT)/../can/can_socket.c \
+	$(CANOPEN_ROOT)/../can/can_netlink.c \
+	$(CANOPEN_ROOT)/libs/CANopenLinux/CO_driver.c \
+	$(CANOPEN_ROOT)/libs/CANopenLinux/CO_error.c \
+	$(CANOPEN_ROOT)/libs/CANopenLinux/CO_epoll_interface.c \
+	$(CANOPEN_ROOT)/libs/CANopenNode/301/CO_ODinterface.c \
+	$(CANOPEN_ROOT)/libs/CANopenNode/301/CO_fifo.c \
+	$(CANOPEN_ROOT)/libs/CANopenNode/301/CO_NMT_Heartbeat.c \
+	$(CANOPEN_ROOT)/libs/CANopenNode/301/CO_Node_Guarding.c \
+	$(CANOPEN_ROOT)/libs/CANopenNode/301/CO_HBconsumer.c \
+	$(CANOPEN_ROOT)/libs/CANopenNode/301/CO_Emergency.c \
+	$(CANOPEN_ROOT)/libs/CANopenNode/301/CO_SDOclient.c \
+	$(CANOPEN_ROOT)/libs/CANopenNode/301/CO_SDOserver.c \
+	$(CANOPEN_ROOT)/libs/CANopenNode/301/CO_TIME.c \
+	$(CANOPEN_ROOT)/libs/CANopenNode/301/CO_SYNC.c \
+	$(CANOPEN_ROOT)/libs/CANopenNode/301/CO_PDO.c \
+	$(CANOPEN_ROOT)/libs/CANopenNode/301/crc16-ccitt.c \
+	$(CANOPEN_ROOT)/libs/CANopenNode/303/CO_LEDs.c \
+	$(CANOPEN_ROOT)/libs/CANopenNode/305/CO_LSSslave.c \
+	$(CANOPEN_ROOT)/libs/CANopenNode/305/CO_LSSmaster.c \
+	$(CANOPEN_ROOT)/libs/CANopenNode/309/CO_gateway_ascii.c \
+	$(CANOPEN_ROOT)/libs/CANopenNode/storage/CO_storage.c \
+	$(CANOPEN_ROOT)/libs/CANopenNode/CANopen.c
+
+all: $(TARGET)
+
+$(TARGET): $(SOURCES)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -o $(TARGET) $(SOURCES) $(LDFLAGS)
+
+debug: $(DEBUG_TARGET)
+
+$(DEBUG_TARGET): main_debug.c $(SOURCES)
+	$(HOST_CC) $(CPPFLAGS) $(CFLAGS) -o $(DEBUG_TARGET) main_debug.c $(SOURCES) $(LDFLAGS)
+
+clean:
+	rm -f $(TARGET) $(DEBUG_TARGET) *.o
+
+.PHONY: all debug clean
+
+# make -C core/src/drivers/plugins/native/canopen/debug debug

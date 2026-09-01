@@ -1,0 +1,56 @@
+{
+  "buses": [
+    {
+      "name": "bus0",
+      "interface": "can0",
+      "enabled": true,
+      "local_node_id": 127,
+      "bitrate": 500000,
+      "sjw": 1,
+      "sample_point": 0.875,
+      "restart_ms": 100,
+      "triple_sampling": false,
+      "heartbeat_ms": 500,
+      "sync_period_ms": 0,
+      "slaves": [
+        {
+          "name": "slave_2",
+          "node_id": 2,
+          "enabled": true,
+          "protection_mode": "node_guarding",
+          "node_guard_time_ms": 500,
+          "node_guard_life_factor": 3,
+          "heartbeat_producer_time_ms": 500,
+          "od_entries": [],
+          "tpdo": [],
+          "rpdo": [
+            {
+              "name": "rpdo_1",
+              "index": 6147,
+              "sub_index": 3,
+              "mapping": [
+                {
+                  "index": 24675,
+                  "sub_index": 0,
+                  "bit_length": 32,
+                  "name": "value_1",
+                  "plc_address": "%ID0",
+                  "direction": "input"
+                },
+                {
+                  "index": 24683,
+                  "sub_index": 0,
+                  "bit_length": 32,
+                  "name": "value_2",
+                  "plc_address": "%ID1",
+                  "direction": "input"
+                }
+              ]
+            }
+          ],
+          "sdo": []
+        }
+      ]
+    }
+  ]
+}

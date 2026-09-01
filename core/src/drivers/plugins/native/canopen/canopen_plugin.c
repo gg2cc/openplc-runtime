@@ -40,6 +40,8 @@
 #define CANOPEN_NMT_CONTROL                                                                        \
     (CO_NMT_STARTUP_TO_OPERATIONAL | CO_NMT_ERR_ON_ERR_REG | CO_ERR_REG_GENERIC_ERR |              \
      CO_ERR_REG_COMMUNICATION)
+#define CANOPEN_LOCAL_RPDO_COUNT 4
+#define CANOPEN_LOCAL_RPDO_MAX_MAPPINGS 8
 
 static inline int canopen_min_int(int a, int b)
 {
@@ -64,7 +66,25 @@ typedef struct
     char last_error[64];
 } canopen_sdo_transaction_t;
 
+typedef struct canopen_runtime_bus_s canopen_runtime_bus_t;
+
 typedef struct
+{
+    bool valid;
+    uint16_t bit_offset;
+    uint16_t bit_length;
+    uint16_t plc_index;
+    uint8_t plc_bit;
+    uint8_t plc_type;
+} canopen_input_binding_t;
+
+typedef struct
+{
+    canopen_runtime_bus_t *runtime;
+    uint8_t rpdo_slot;
+} canopen_rpdo_callback_context_t;
+
+struct canopen_runtime_bus_s
 {
     CO_t *co;
     bool initialized;
@@ -84,7 +104,12 @@ typedef struct
     CO_epoll_t epoll;
     pthread_mutex_t stack_mutex;
     canopen_sdo_transaction_t sdo_transaction;
-} canopen_runtime_bus_t;
+    canopen_input_binding_t input_bindings[CANOPEN_LOCAL_RPDO_COUNT]
+                                          [CANOPEN_LOCAL_RPDO_MAX_MAPPINGS];
+    uint8_t input_binding_count[CANOPEN_LOCAL_RPDO_COUNT];
+    uint8_t input_rpdo_node_id[CANOPEN_LOCAL_RPDO_COUNT];
+    canopen_rpdo_callback_context_t rpdo_callback_context[CANOPEN_LOCAL_RPDO_COUNT];
+};
 
 static int canopen_parse_iec_address(const char *address, char *prefix, size_t prefix_len,
                                      int *index, int *bit);
@@ -92,6 +117,9 @@ static void canopen_send_configured_sdos(const canopen_bus_config_t *bus,
                                          canopen_runtime_bus_t *runtime);
 static bool canopen_has_node_guarding_slaves(const canopen_bus_config_t *bus);
 static bool canopen_configure_node_guarding(const canopen_bus_config_t *bus, CO_t *co);
+static void canopen_rpdo_signal_pre(void *object);
+static void canopen_configure_local_rpdos(const canopen_bus_config_t *bus,
+                                          canopen_runtime_bus_t *runtime);
 
 static plugin_runtime_args_t g_args;
 static plugin_logger_t g_logger;
@@ -632,9 +660,254 @@ static uint16_t get_bus_bitrate_kbps(const canopen_bus_config_t *bus)
     return (uint16_t)(bus->bitrate / 1000U);
 }
 
-static void apply_od_pdo_defaults(const canopen_bus_config_t *bus)
+static bool canopen_prepare_input_binding(const canopen_pdo_mapping_t *mapping, int buffer_size,
+                                          canopen_input_binding_t *binding)
 {
-    if (bus == NULL)
+    if (mapping == NULL || binding == NULL || !mapping->bound || mapping->plc_address[0] == '\0' ||
+        mapping->direction[0] == '\0' || strcasecmp(mapping->direction, "input") != 0)
+    {
+        return false;
+    }
+
+    char prefix[4] = {0};
+    int iec_index  = 0;
+    int iec_bit    = 0;
+    if (!canopen_parse_iec_address(mapping->plc_address, prefix, sizeof(prefix), &iec_index,
+                                   &iec_bit) ||
+        iec_index < 0 || iec_index >= buffer_size || iec_bit < 0)
+    {
+        return false;
+    }
+
+    char address[64] = {0};
+    if (sscanf(mapping->plc_address, "%63s", address) != 1 ||
+        (strncasecmp(address, "%IX", 3) != 0 && strncasecmp(address, "%IB", 3) != 0 &&
+         strncasecmp(address, "%IW", 3) != 0 && strncasecmp(address, "%ID", 3) != 0 &&
+         strncasecmp(address, "%IL", 3) != 0))
+    {
+        return false;
+    }
+
+    uint16_t default_length = 0U;
+    uint8_t plc_type        = 0U;
+    if (strncasecmp(address, "%IX", 3) == 0)
+    {
+        if (iec_bit >= 8)
+        {
+            return false;
+        }
+        default_length = 1U;
+        plc_type       = 0U;
+    }
+    else if (strncasecmp(address, "%IB", 3) == 0)
+    {
+        default_length = 8U;
+        plc_type       = 3U;
+    }
+    else if (strncasecmp(address, "%IW", 3) == 0)
+    {
+        default_length = 16U;
+        plc_type       = 5U;
+    }
+    else if (strncasecmp(address, "%ID", 3) == 0)
+    {
+        default_length = 32U;
+        plc_type       = 8U;
+    }
+    else
+    {
+        default_length = 64U;
+        plc_type       = 11U;
+    }
+
+    uint16_t bit_length = mapping->bit_length != 0U ? mapping->bit_length : default_length;
+    if (bit_length == 0U || bit_length > 64U || (bit_length > 1U && (bit_length & 0x07U) != 0U))
+    {
+        return false;
+    }
+
+    binding->valid      = true;
+    binding->bit_offset = 0U;
+    binding->bit_length = bit_length;
+    binding->plc_index  = (uint16_t)iec_index;
+    binding->plc_bit    = (uint8_t)iec_bit;
+    binding->plc_type   = plc_type;
+    return true;
+}
+
+static uint64_t canopen_read_rpdo_bits(const uint8_t *payload, uint16_t bit_offset,
+                                       uint16_t bit_length)
+{
+    if (payload == NULL || bit_length == 0U || bit_length > 64U)
+    {
+        return 0U;
+    }
+
+    uint64_t value = 0U;
+    for (uint16_t bit = 0U; bit < bit_length; bit++)
+    {
+        uint16_t source_bit = (uint16_t)(bit_offset + bit);
+        if ((payload[source_bit >> 3U] & (uint8_t)(1U << (source_bit & 0x07U))) != 0U)
+        {
+            value |= (uint64_t)1U << bit;
+        }
+    }
+    return value;
+}
+
+static void canopen_rpdo_signal_pre(void *object)
+{
+    const canopen_rpdo_callback_context_t *context =
+        (const canopen_rpdo_callback_context_t *)object;
+    if (context == NULL || context->runtime == NULL || context->runtime->co == NULL ||
+        context->rpdo_slot >= CANOPEN_LOCAL_RPDO_COUNT ||
+        context->runtime->input_binding_count[context->rpdo_slot] == 0U)
+    {
+        return;
+    }
+
+    CO_RPDO_t *rpdo        = &context->runtime->co->RPDO[context->rpdo_slot];
+    const uint8_t *payload = rpdo->CANrxData[0];
+    uint8_t binding_count  = context->runtime->input_binding_count[context->rpdo_slot];
+    for (uint8_t i = 0U; i < binding_count; i++)
+    {
+        const canopen_input_binding_t *binding =
+            &context->runtime->input_bindings[context->rpdo_slot][i];
+        if (!binding->valid)
+        {
+            continue;
+        }
+
+        uint64_t value = canopen_read_rpdo_bits(payload, binding->bit_offset, binding->bit_length);
+        switch (binding->plc_type)
+        {
+        case 0U:
+            if (g_args.journal_write_bool != NULL)
+            {
+                g_args.journal_write_bool(0, binding->plc_index, binding->plc_bit,
+                                          value != 0U ? 1 : 0);
+            }
+            break;
+        case 3U:
+            if (g_args.journal_write_byte != NULL)
+            {
+                g_args.journal_write_byte(3, binding->plc_index, (int)(uint8_t)value);
+            }
+            break;
+        case 5U:
+            if (g_args.journal_write_int != NULL)
+            {
+                g_args.journal_write_int(5, binding->plc_index, (int)(uint16_t)value);
+            }
+            break;
+        case 8U:
+            if (g_args.journal_write_dint != NULL)
+            {
+                g_args.journal_write_dint(8, binding->plc_index, (unsigned int)(uint32_t)value);
+            }
+            break;
+        case 11U:
+            if (g_args.journal_write_lint != NULL)
+            {
+                g_args.journal_write_lint(11, binding->plc_index, (unsigned long long)value);
+            }
+            break;
+        default:
+            break;
+        }
+    }
+}
+
+static void canopen_configure_local_rpdos(const canopen_bus_config_t *bus,
+                                          canopen_runtime_bus_t *runtime)
+{
+    if (bus == NULL || runtime == NULL || OD == NULL)
+    {
+        return;
+    }
+
+    memset(runtime->input_bindings, 0, sizeof(runtime->input_bindings));
+    memset(runtime->input_binding_count, 0, sizeof(runtime->input_binding_count));
+    memset(runtime->input_rpdo_node_id, 0, sizeof(runtime->input_rpdo_node_id));
+
+    for (int s = 0; s < bus->slave_count; s++)
+    {
+        const canopen_slave_config_t *slave = &bus->slaves[s];
+        if (!slave->enabled || slave->node_id == 0U || slave->node_id > 127U)
+        {
+            continue;
+        }
+
+        for (int p = 0; p < slave->rpdo_count; p++)
+        {
+            const canopen_pdo_t *pdo = &slave->rpdo[p];
+            if (pdo->index < 0x1800U || pdo->index >= 0x1804U || pdo->mapping_count <= 0)
+            {
+                continue;
+            }
+
+            uint8_t slot = (uint8_t)(pdo->index - 0x1800U);
+            if (runtime->input_binding_count[slot] != 0U)
+            {
+                plugin_logger_warn(&g_logger,
+                                   "CANopen local RPDO slot collision: slot=%u old_node=%u "
+                                   "new_node=%u; replacing binding",
+                                   slot, runtime->input_rpdo_node_id[slot], slave->node_id);
+            }
+
+            runtime->input_binding_count[slot] = 0U;
+            runtime->input_rpdo_node_id[slot]  = (uint8_t)slave->node_id;
+            uint16_t bit_offset                = 0U;
+            uint8_t map_count =
+                (uint8_t)canopen_min_int(pdo->mapping_count, CANOPEN_LOCAL_RPDO_MAX_MAPPINGS);
+            for (uint8_t m = 0U; m < map_count; m++)
+            {
+                const canopen_pdo_mapping_t *mapping = &pdo->mapping[m];
+                if (mapping->bit_length == 0U || mapping->bit_length > 64U ||
+                    (mapping->bit_length & 0x07U) != 0U ||
+                    (uint32_t)bit_offset + mapping->bit_length > 8U * 8U)
+                {
+                    plugin_logger_warn(&g_logger,
+                                       "Skipping invalid local RPDO mapping: bus=%s slave=%s "
+                                       "pdo=%s map=%s bits=%u",
+                                       bus->name, slave->name, pdo->name, mapping->name,
+                                       mapping->bit_length);
+                    continue;
+                }
+
+                uint32_t local_map = (uint32_t)mapping->bit_length;
+                (void)OD_set_u32(OD_find(OD, (uint16_t)(0x1600U + slot)), (uint8_t)(m + 1U),
+                                 local_map, true);
+
+                canopen_input_binding_t *binding =
+                    &runtime->input_bindings[slot][runtime->input_binding_count[slot]];
+                if (canopen_prepare_input_binding(mapping, g_args.buffer_size, binding))
+                {
+                    binding->bit_offset = bit_offset;
+                    runtime->input_binding_count[slot]++;
+                }
+                bit_offset = (uint16_t)(bit_offset + mapping->bit_length);
+            }
+
+            (void)OD_set_u8(OD_find(OD, (uint16_t)(0x1600U + slot)), 0U, map_count, true);
+            (void)OD_set_u32(OD_find(OD, (uint16_t)(0x1400U + slot)), 1U,
+                             (uint32_t)(0x180U + ((uint32_t)slot * 0x100U) + slave->node_id), true);
+            (void)OD_set_u8(OD_find(OD, (uint16_t)(0x1400U + slot)), 2U, 0xFEU, true);
+            (void)OD_set_u16(OD_find(OD, (uint16_t)(0x1400U + slot)), 5U, 0U, true);
+
+            plugin_logger_info(&g_logger,
+                               "CANopen local RPDO configured: bus=%s slave=%s slot=%u "
+                               "source_tpdo=0x%04X cob_id=0x%03X mappings=%u inputs=%u",
+                               bus->name, slave->name, slot, pdo->index,
+                               (unsigned)(0x180U + ((uint32_t)slot * 0x100U) + slave->node_id),
+                               map_count, runtime->input_binding_count[slot]);
+        }
+    }
+}
+
+static void apply_od_pdo_defaults(const canopen_bus_config_t *bus, canopen_runtime_bus_t *runtime)
+{
+    if (bus == NULL || runtime == NULL)
     {
         return;
     }
@@ -646,140 +919,13 @@ static void apply_od_pdo_defaults(const canopen_bus_config_t *bus)
     const uint16_t local_node_id = bus->local_node_id > 0U ? bus->local_node_id : 0x7FU;
 
     /* Runtime uses the generated OD.c defaults as the source of truth. JSON od_entries are
-     * editor metadata only and are intentionally ignored here; slave PDOs are consumed from the
-     * binding table instead of dynamically creating OD entries from JSON. */
+     * editor metadata only. A slave TPDO is received by the master through a local RPDO. */
     OD_PERSIST_COMM.x1018_identity.vendor_ID      = (uint32_t)local_node_id;
     OD_PERSIST_COMM.x1018_identity.productCode    = (uint32_t)bus->bitrate;
     OD_PERSIST_COMM.x1018_identity.revisionNumber = bus->heartbeat_ms;
     OD_PERSIST_COMM.x1018_identity.serialNumber   = bus->sync_period_ms;
 
-    const canopen_pdo_t *rpdo_ref = NULL;
-    const canopen_pdo_t *tpdo_ref = NULL;
-
-    for (int s = 0; s < bus->slave_count; s++)
-    {
-        const canopen_slave_config_t *slave = &bus->slaves[s];
-        if (!slave->enabled)
-        {
-            continue;
-        }
-        if (rpdo_ref == NULL && slave->rpdo_count > 0 && slave->rpdo[0].mapping_count > 0)
-        {
-            rpdo_ref = &slave->rpdo[0];
-        }
-        if (tpdo_ref == NULL && slave->tpdo_count > 0 && slave->tpdo[0].mapping_count > 0)
-        {
-            tpdo_ref = &slave->tpdo[0];
-        }
-    }
-
-    if (rpdo_ref != NULL)
-    {
-        uint8_t count = (uint8_t)canopen_min_int(rpdo_ref->mapping_count, 8);
-        plugin_logger_info(&g_logger,
-                           "apply_od_pdo_defaults: selected RPDO=%s index=0x%04X mappings=%d",
-                           rpdo_ref->name, rpdo_ref->index, rpdo_ref->mapping_count);
-        OD_PERSIST_COMM.x1400_RPDOCommunicationParameter.highestSub_indexSupported = 0x05U;
-        OD_PERSIST_COMM.x1400_RPDOCommunicationParameter.COB_IDUsedByRPDO =
-            (uint32_t)(0x200U + local_node_id);
-        OD_PERSIST_COMM.x1400_RPDOCommunicationParameter.transmissionType = 0xFEU;
-        OD_PERSIST_COMM.x1400_RPDOCommunicationParameter.eventTimer       = 0U;
-
-        memset(&OD_PERSIST_COMM.x1600_RPDOMappingParameter, 0,
-               sizeof(OD_PERSIST_COMM.x1600_RPDOMappingParameter));
-        OD_PERSIST_COMM.x1600_RPDOMappingParameter.numberOfMappedApplicationObjectsInPDO = count;
-        for (uint8_t i = 0; i < count; i++)
-        {
-            const canopen_pdo_mapping_t *mapping = &rpdo_ref->mapping[i];
-            uint32_t map                         = ((uint32_t)mapping->index << 16U) |
-                                                   ((uint32_t)mapping->sub_index << 8U) |
-                                                   ((uint32_t)mapping->bit_length & 0xFFU);
-            switch (i)
-            {
-            case 0:
-                OD_PERSIST_COMM.x1600_RPDOMappingParameter.applicationObject1 = map;
-                break;
-            case 1:
-                OD_PERSIST_COMM.x1600_RPDOMappingParameter.applicationObject2 = map;
-                break;
-            case 2:
-                OD_PERSIST_COMM.x1600_RPDOMappingParameter.applicationObject3 = map;
-                break;
-            case 3:
-                OD_PERSIST_COMM.x1600_RPDOMappingParameter.applicationObject4 = map;
-                break;
-            case 4:
-                OD_PERSIST_COMM.x1600_RPDOMappingParameter.applicationObject5 = map;
-                break;
-            case 5:
-                OD_PERSIST_COMM.x1600_RPDOMappingParameter.applicationObject6 = map;
-                break;
-            case 6:
-                OD_PERSIST_COMM.x1600_RPDOMappingParameter.applicationObject7 = map;
-                break;
-            case 7:
-                OD_PERSIST_COMM.x1600_RPDOMappingParameter.applicationObject8 = map;
-                break;
-            default:
-                break;
-            }
-        }
-    }
-
-    if (tpdo_ref != NULL)
-    {
-        uint8_t count = (uint8_t)canopen_min_int(tpdo_ref->mapping_count, 8);
-        plugin_logger_info(&g_logger,
-                           "apply_od_pdo_defaults: selected TPDO=%s index=0x%04X mappings=%d",
-                           tpdo_ref->name, tpdo_ref->index, tpdo_ref->mapping_count);
-        OD_PERSIST_COMM.x1800_TPDOCommunicationParameter.highestSub_indexSupported = 0x06U;
-        OD_PERSIST_COMM.x1800_TPDOCommunicationParameter.COB_IDUsedByTPDO =
-            (uint32_t)(0x180U + local_node_id);
-        OD_PERSIST_COMM.x1800_TPDOCommunicationParameter.transmissionType = 0xFEU;
-        OD_PERSIST_COMM.x1800_TPDOCommunicationParameter.inhibitTime      = 0U;
-        OD_PERSIST_COMM.x1800_TPDOCommunicationParameter.eventTimer       = 0U;
-        OD_PERSIST_COMM.x1800_TPDOCommunicationParameter.SYNCStartValue   = 0U;
-
-        memset(&OD_PERSIST_COMM.x1A00_TPDOMappingParameter, 0,
-               sizeof(OD_PERSIST_COMM.x1A00_TPDOMappingParameter));
-        OD_PERSIST_COMM.x1A00_TPDOMappingParameter.numberOfMappedApplicationObjectsInPDO = count;
-        for (uint8_t i = 0; i < count; i++)
-        {
-            const canopen_pdo_mapping_t *mapping = &tpdo_ref->mapping[i];
-            uint32_t map                         = ((uint32_t)mapping->index << 16U) |
-                                                   ((uint32_t)mapping->sub_index << 8U) |
-                                                   ((uint32_t)mapping->bit_length & 0xFFU);
-            switch (i)
-            {
-            case 0:
-                OD_PERSIST_COMM.x1A00_TPDOMappingParameter.applicationObject1 = map;
-                break;
-            case 1:
-                OD_PERSIST_COMM.x1A00_TPDOMappingParameter.applicationObject2 = map;
-                break;
-            case 2:
-                OD_PERSIST_COMM.x1A00_TPDOMappingParameter.applicationObject3 = map;
-                break;
-            case 3:
-                OD_PERSIST_COMM.x1A00_TPDOMappingParameter.applicationObject4 = map;
-                break;
-            case 4:
-                OD_PERSIST_COMM.x1A00_TPDOMappingParameter.applicationObject5 = map;
-                break;
-            case 5:
-                OD_PERSIST_COMM.x1A00_TPDOMappingParameter.applicationObject6 = map;
-                break;
-            case 6:
-                OD_PERSIST_COMM.x1A00_TPDOMappingParameter.applicationObject7 = map;
-                break;
-            case 7:
-                OD_PERSIST_COMM.x1A00_TPDOMappingParameter.applicationObject8 = map;
-                break;
-            default:
-                break;
-            }
-        }
-    }
+    canopen_configure_local_rpdos(bus, runtime);
 }
 
 static int canopen_parse_iec_address(const char *address, char *prefix, size_t prefix_len,
@@ -803,7 +949,7 @@ static int canopen_parse_iec_address(const char *address, char *prefix, size_t p
         strncasecmp(work, "%QL", 3) == 0 || strncasecmp(work, "%IL", 3) == 0)
     {
         snprintf(prefix, prefix_len, "%c%c", work[0], work[1]);
-        char *suffix = work + 2;
+        char *suffix = work + 3;
 
         if (strncasecmp(work, "%QX", 3) == 0 || strncasecmp(work, "%IX", 3) == 0)
         {
@@ -992,103 +1138,6 @@ static int canopen_bus_plc_to_od(const canopen_bus_config_t *bus,
     return 0;
 }
 
-static int canopen_od_to_plc_input(const canopen_bus_config_t *bus,
-                                   const canopen_pdo_mapping_t *mapping)
-{
-    if (bus == NULL || mapping == NULL || !OD)
-    {
-        return 0;
-    }
-
-    if (!mapping->bound || mapping->plc_address[0] == '\0')
-    {
-        return 0;
-    }
-
-    if (mapping->direction[0] != '\0' && strcasecmp(mapping->direction, "input") != 0)
-    {
-        return 0;
-    }
-
-    OD_entry_t *od_entry = OD_find(OD, mapping->index);
-    if (od_entry == NULL)
-    {
-        return 0;
-    }
-
-    const char *type = mapping->data_type[0] ? mapping->data_type : "u32";
-    char prefix[4];
-    int iec_index = 0;
-    int iec_bit   = 0;
-
-    if (strcasecmp(type, "bool") == 0)
-    {
-        uint8_t val = 0U;
-        if (OD_get_u8(od_entry, mapping->sub_index, &val, false) == ODR_OK &&
-            g_args.journal_write_bool &&
-            canopen_parse_iec_address(mapping->plc_address, prefix, sizeof(prefix), &iec_index,
-                                      &iec_bit))
-        {
-            g_args.journal_write_bool(0, iec_index, iec_bit, (int)val);
-            return 1;
-        }
-        return 0;
-    }
-    if (strcasecmp(type, "u8") == 0 || strcasecmp(type, "byte") == 0)
-    {
-        uint8_t val = 0U;
-        if (OD_get_u8(od_entry, mapping->sub_index, &val, false) == ODR_OK &&
-            g_args.journal_write_byte &&
-            canopen_parse_iec_address(mapping->plc_address, prefix, sizeof(prefix), &iec_index,
-                                      &iec_bit))
-        {
-            g_args.journal_write_byte(3, iec_index, (int)val);
-            return 1;
-        }
-        return 0;
-    }
-    if (strcasecmp(type, "i16") == 0 || strcasecmp(type, "u16") == 0)
-    {
-        uint16_t val = 0U;
-        if (OD_get_u16(od_entry, mapping->sub_index, &val, false) == ODR_OK &&
-            g_args.journal_write_int &&
-            canopen_parse_iec_address(mapping->plc_address, prefix, sizeof(prefix), &iec_index,
-                                      &iec_bit))
-        {
-            g_args.journal_write_int(5, iec_index, (int)val);
-            return 1;
-        }
-        return 0;
-    }
-    if (strcasecmp(type, "i32") == 0 || strcasecmp(type, "u32") == 0)
-    {
-        uint32_t val = 0U;
-        if (OD_get_u32(od_entry, mapping->sub_index, &val, false) == ODR_OK &&
-            g_args.journal_write_dint &&
-            canopen_parse_iec_address(mapping->plc_address, prefix, sizeof(prefix), &iec_index,
-                                      &iec_bit))
-        {
-            g_args.journal_write_dint(8, iec_index, (unsigned int)val);
-            return 1;
-        }
-        return 0;
-    }
-    if (strcasecmp(type, "i64") == 0 || strcasecmp(type, "u64") == 0)
-    {
-        uint64_t val = 0U;
-        if (OD_get_u64(od_entry, mapping->sub_index, &val, false) == ODR_OK &&
-            g_args.journal_write_lint &&
-            canopen_parse_iec_address(mapping->plc_address, prefix, sizeof(prefix), &iec_index,
-                                      &iec_bit))
-        {
-            g_args.journal_write_lint(11, iec_index, (unsigned long long)val);
-            return 1;
-        }
-        return 0;
-    }
-    return 0;
-}
-
 static void sync_canopen_bus_to_plc_image(const canopen_bus_config_t *bus)
 {
     if (bus == NULL || g_args.buffer_size <= 0)
@@ -1113,54 +1162,6 @@ static void sync_canopen_bus_to_plc_image(const canopen_bus_config_t *bus)
             for (int j = 0; j < slave->tpdo[i].mapping_count; j++)
             {
                 canopen_bus_plc_to_od(bus, &slave->tpdo[i].mapping[j]);
-            }
-        }
-        for (int i = 0; i < slave->rpdo_count; i++)
-        {
-            for (int j = 0; j < slave->rpdo[i].mapping_count; j++)
-            {
-                canopen_bus_plc_to_od(bus, &slave->rpdo[i].mapping[j]);
-            }
-        }
-    }
-
-    if (g_args.image_unlock)
-    {
-        g_args.image_unlock();
-    }
-}
-
-static void sync_plc_image_to_canopen(const canopen_bus_config_t *bus)
-{
-    if (bus == NULL || g_args.buffer_size <= 0)
-    {
-        return;
-    }
-
-    if (g_args.image_lock)
-    {
-        g_args.image_lock();
-    }
-
-    for (int s = 0; s < bus->slave_count; s++)
-    {
-        const canopen_slave_config_t *slave = &bus->slaves[s];
-        if (!slave->enabled)
-        {
-            continue;
-        }
-        for (int i = 0; i < slave->tpdo_count; i++)
-        {
-            for (int j = 0; j < slave->tpdo[i].mapping_count; j++)
-            {
-                canopen_od_to_plc_input(bus, &slave->tpdo[i].mapping[j]);
-            }
-        }
-        for (int i = 0; i < slave->rpdo_count; i++)
-        {
-            for (int j = 0; j < slave->rpdo[i].mapping_count; j++)
-            {
-                canopen_od_to_plc_input(bus, &slave->rpdo[i].mapping[j]);
             }
         }
     }
@@ -1353,16 +1354,18 @@ static void canopen_add_pdo_mapping_sdos(const canopen_slave_config_t *slave,
             continue;
         }
 
-        uint16_t comm_index = pdo->index; // 0x1800 - 0x1807
+        uint16_t comm_index = pdo->index;                      // 0x1800 - 0x1807
         uint16_t map_index  = (uint16_t)(pdo->index + 0x200U); // 0x1A00 - 0x1A07
-        uint32_t cob_id = (uint32_t)(0x180U + ((uint32_t)(comm_index - 0x1800U) * 0x100U) + slave->node_id);
+        uint32_t cob_id =
+            (uint32_t)(0x180U + ((uint32_t)(comm_index - 0x1800U) * 0x100U) + slave->node_id);
 
         snprintf(entries[count].name, sizeof(entries[count].name), "rpdo_%d_map_count", p + 1);
-        entries[count].index         = map_index;
-        entries[count].sub_index     = 0U;
-        entries[count].data_type[0]  = 'u';
-        entries[count].data_type[1]  = '8';
-        entries[count].default_value = pdo->mapping_count; // the number of mapped application objects in the PDO
+        entries[count].index        = map_index;
+        entries[count].sub_index    = 0U;
+        entries[count].data_type[0] = 'u';
+        entries[count].data_type[1] = '8';
+        entries[count].default_value =
+            pdo->mapping_count; // the number of mapped application objects in the PDO
         count++;
 
         for (int m = 0; m < pdo->mapping_count; m++)
@@ -1382,7 +1385,9 @@ static void canopen_add_pdo_mapping_sdos(const canopen_slave_config_t *slave,
             entries[count].data_type[2] = '2';
             entries[count].default_value =
                 (int32_t)(((uint32_t)mapping->index << 16U) | ((uint32_t)mapping->sub_index << 8U) |
-                          (uint32_t)mapping->bit_length); // the mapping value is a 32-bit value that encodes the index, sub-index, and bit length of the mapped object
+                          (uint32_t)mapping->bit_length); // the mapping value is a 32-bit value
+                                                          // that encodes the index, sub-index, and
+                                                          // bit length of the mapped object
             count++;
         }
 
@@ -1413,12 +1418,13 @@ static void canopen_add_pdo_mapping_sdos(const canopen_slave_config_t *slave,
         count++;
 
         snprintf(entries[count].name, sizeof(entries[count].name), "rpdo_%d_event_timer", p + 1);
-        entries[count].index         = comm_index;
-        entries[count].sub_index     = 5U;
-        entries[count].data_type[0]  = 'u';
-        entries[count].data_type[1]  = '1';
-        entries[count].data_type[2]  = '6';
-        entries[count].default_value = 0; // the event timer of the TPDO in milliseconds (0 means no event timer)
+        entries[count].index        = comm_index;
+        entries[count].sub_index    = 5U;
+        entries[count].data_type[0] = 'u';
+        entries[count].data_type[1] = '1';
+        entries[count].data_type[2] = '6';
+        entries[count].default_value =
+            0; // the event timer of the TPDO in milliseconds (0 means no event timer)
         count++;
     }
 
@@ -1430,18 +1436,20 @@ static void canopen_add_pdo_mapping_sdos(const canopen_slave_config_t *slave,
             continue;
         }
 
-        uint16_t comm_index = pdo->index; // 0x1400 - 0x1407
+        uint16_t comm_index = pdo->index;                      // 0x1400 - 0x1407
         uint16_t map_index  = (uint16_t)(pdo->index + 0x200U); // 0x1600 - 0x1607
-        uint32_t cob_id = (uint32_t)(0x200U + ((uint32_t)(comm_index - 0x1400U) * 0x100U) + slave->node_id);
+        uint32_t cob_id =
+            (uint32_t)(0x200U + ((uint32_t)(comm_index - 0x1400U) * 0x100U) + slave->node_id);
 
         snprintf(entries[count].name, sizeof(entries[count].name), "tpdo_%d_map_count", p + 1);
-        entries[count].index         = map_index;
-        entries[count].sub_index     = 0U;
-        entries[count].data_type[0]  = 'u';
-        entries[count].data_type[1]  = '8';
-        entries[count].default_value = pdo->mapping_count; // the number of mapped application objects in the PDO
+        entries[count].index        = map_index;
+        entries[count].sub_index    = 0U;
+        entries[count].data_type[0] = 'u';
+        entries[count].data_type[1] = '8';
+        entries[count].default_value =
+            pdo->mapping_count; // the number of mapped application objects in the PDO
         count++;
-        
+
         for (int m = 0; m < pdo->mapping_count; m++)
         {
             const canopen_pdo_mapping_t *mapping = &pdo->mapping[m];
@@ -1459,7 +1467,9 @@ static void canopen_add_pdo_mapping_sdos(const canopen_slave_config_t *slave,
             entries[count].data_type[2] = '2';
             entries[count].default_value =
                 (int32_t)(((uint32_t)mapping->index << 16U) | ((uint32_t)mapping->sub_index << 8U) |
-                          (uint32_t)mapping->bit_length); // the mapping value is a 32-bit value that encodes the index, sub-index, and bit length of the mapped object
+                          (uint32_t)mapping->bit_length); // the mapping value is a 32-bit value
+                                                          // that encodes the index, sub-index, and
+                                                          // bit length of the mapped object
             count++;
         }
 
@@ -1674,8 +1684,7 @@ static int init_runtime_bus(const canopen_bus_config_t *bus, int bus_index)
         }
     }
 
-    apply_od_pdo_defaults(
-        bus); // Apply PDO defaults to the Object Dictionary based on the bus configuration
+    apply_od_pdo_defaults(bus, &g_runtime_buses[bus_index]);
     canopen_apply_heartbeat_defaults(
         bus, co); // Apply heartbeat defaults to the CANopen stack based on the bus configuration
 
@@ -1824,6 +1833,28 @@ static int init_runtime_bus(const canopen_bus_config_t *bus, int bus_index)
         &g_logger,
         "CANopen init sequence: step=PDO_init OK bus=%s node_id=%u tpdo_count=%d rpdo_count=%d",
         bus->name, g_runtime_buses[bus_index].node_id, bus->tpdo_count, bus->rpdo_count);
+
+    for (uint8_t slot = 0U; slot < CANOPEN_LOCAL_RPDO_COUNT; slot++)
+    {
+        if (g_runtime_buses[bus_index].input_binding_count[slot] == 0U)
+        {
+            continue;
+        }
+        g_runtime_buses[bus_index].rpdo_callback_context[slot].runtime =
+            &g_runtime_buses[bus_index];
+        g_runtime_buses[bus_index].rpdo_callback_context[slot].rpdo_slot = slot;
+        CO_RPDO_initCallbackPre(&co->RPDO[slot],
+                                &g_runtime_buses[bus_index].rpdo_callback_context[slot],
+                                canopen_rpdo_signal_pre);
+        plugin_logger_info(&g_logger,
+                           "CANopen local RPDO input callback bound: bus=%s slot=%u cob_id=0x%03X "
+                           "node_id=%u mappings=%u",
+                           bus->name, slot,
+                           (unsigned)(0x180U + ((uint32_t)slot * 0x100U) +
+                                      g_runtime_buses[bus_index].input_rpdo_node_id[slot]),
+                           g_runtime_buses[bus_index].input_rpdo_node_id[slot],
+                           g_runtime_buses[bus_index].input_binding_count[slot]);
+    }
 
     CO_CANsetNormalMode(co->CANmodule);
     plugin_logger_info(&g_logger, "CANopen init sequence: step=CAN_normal_mode bus=%s if=%s fd=%d",
@@ -1976,7 +2007,6 @@ void cycle_end(void)
             /* Exchange PDO process image when slave node(s) are confirmed in Operational state */
             if (g_runtime_buses[i].startup_confirmed)
             {
-                sync_plc_image_to_canopen(bus);
                 sync_canopen_bus_to_plc_image(bus);
             }
         }
