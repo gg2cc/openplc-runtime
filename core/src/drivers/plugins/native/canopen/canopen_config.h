@@ -62,6 +62,7 @@ extern "C"
         uint32_t node_guard_time_ms;
         uint8_t node_guard_life_factor;
         uint32_t heartbeat_producer_time_ms;
+        char status_plc_address[32];
         int tpdo_count;
         canopen_pdo_t tpdo[MAX_CANOPEN_PDO_COUNT];
         int rpdo_count;
@@ -84,6 +85,8 @@ extern "C"
         bool auto_bringup;
         uint32_t heartbeat_ms;
         uint32_t sync_period_ms;
+        char bus_status_plc_address[32];
+        char master_status_plc_address[32];
         int tpdo_count;
         canopen_pdo_t tpdo[MAX_CANOPEN_PDO_COUNT];
         int rpdo_count;

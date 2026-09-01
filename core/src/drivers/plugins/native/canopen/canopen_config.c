@@ -341,6 +341,13 @@ static void parse_slave(cJSON *item, canopen_slave_config_t *slave, plugin_logge
         slave->heartbeat_producer_time_ms = (uint32_t)heartbeat_producer_time_ms->valueint;
     }
 
+    cJSON *status_plc_address = cJSON_GetObjectItem(item, "status_plc_address");
+    if (cJSON_IsString(status_plc_address) && status_plc_address->valuestring)
+    {
+        copy_string(slave->status_plc_address, sizeof(slave->status_plc_address),
+                    status_plc_address->valuestring);
+    }
+
     cJSON *tpdo = cJSON_GetObjectItem(item, "tpdo");
     parse_pdo(tpdo, &slave->tpdo_count, slave->tpdo, "tpdo", logger);
 
@@ -508,6 +515,20 @@ static void parse_bus(cJSON *item, canopen_bus_config_t *bus, plugin_logger_t *l
     if (cJSON_IsNumber(sync_period))
     {
         bus->sync_period_ms = (uint32_t)sync_period->valueint;
+    }
+
+    cJSON *bus_status_plc_address = cJSON_GetObjectItem(item, "bus_status_plc_address");
+    if (cJSON_IsString(bus_status_plc_address) && bus_status_plc_address->valuestring)
+    {
+        copy_string(bus->bus_status_plc_address, sizeof(bus->bus_status_plc_address),
+                    bus_status_plc_address->valuestring);
+    }
+
+    cJSON *master_status_plc_address = cJSON_GetObjectItem(item, "master_status_plc_address");
+    if (cJSON_IsString(master_status_plc_address) && master_status_plc_address->valuestring)
+    {
+        copy_string(bus->master_status_plc_address, sizeof(bus->master_status_plc_address),
+                    master_status_plc_address->valuestring);
     }
 
     cJSON *tpdo = cJSON_GetObjectItem(item, "tpdo");

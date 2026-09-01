@@ -12,6 +12,8 @@
       "triple_sampling": false,
       "heartbeat_ms": 500,
       "sync_period_ms": 0,
+      "bus_status_plc_address": "%IB0",
+      "master_status_plc_address": "%IB1",
       "slaves": [
         {
           "name": "slave_2",
@@ -21,7 +23,32 @@
           "node_guard_time_ms": 500,
           "node_guard_life_factor": 3,
           "heartbeat_producer_time_ms": 500,
-          "tpdo": [],
+          "status_plc_address": "%IB2",
+          "tpdo": [
+            {
+              "name": "tpdo_1",
+              "index": 5123,
+              "sub_index": 0,
+              "mapping": [
+                {
+                  "index": 24705,
+                  "sub_index": 0,
+                  "data_type": "i32",
+                  "name": "value_1",
+                  "plc_address": "%QD0",
+                  "direction": "output"
+                },
+                {
+                  "index": 24831,
+                  "sub_index": 0,
+                  "data_type": "i32",
+                  "name": "value_2",
+                  "plc_address": "%QD1",
+                  "direction": "output"
+                }
+              ]
+            }
+          ],
           "rpdo": [
             {
               "name": "rpdo_1",
@@ -31,15 +58,15 @@
                 {
                   "index": 24675,
                   "sub_index": 0,
-                  "bit_length": 32,
+                  "data_type": "i32",
                   "name": "value_1",
                   "plc_address": "%ID0",
                   "direction": "input"
                 },
                 {
-                  "index": 24683,
+                  "index": 24684,
                   "sub_index": 0,
-                  "bit_length": 32,
+                  "data_type": "i32",
                   "name": "value_2",
                   "plc_address": "%ID1",
                   "direction": "input"
@@ -47,7 +74,16 @@
               ]
             }
           ],
-          "sdo": []
+          "sdo": [
+            {
+              "name": "CAN通讯中断模式",
+              "index": 24583,
+              "sub_index": 0,
+              "data_type": "i16",
+              "default_value": 1,
+              "description": ""
+            }
+          ]
         }
       ]
     }

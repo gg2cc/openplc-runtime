@@ -230,6 +230,9 @@ static void canopen_configure_local_tpdos(const canopen_bus_config_t *bus,
                                           canopen_runtime_bus_t *runtime);
 static void sync_plc_image_to_canopen_bus(const canopen_bus_config_t *bus,
                                           canopen_runtime_bus_t *runtime);
+static int canopen_parse_status_address(const char *address, uint16_t *index);
+static void canopen_update_status_outputs(const canopen_bus_config_t *bus,
+                                          canopen_runtime_bus_t *runtime);
 
 static plugin_runtime_args_t g_args;
 static plugin_logger_t g_logger;
@@ -1354,6 +1357,100 @@ static int canopen_parse_iec_address(const char *address, char *prefix, size_t p
     return 0;
 }
 
+static int canopen_parse_status_address(const char *address, uint16_t *index)
+{
+    if (address == NULL || index == NULL)
+    {
+        return 0;
+    }
+
+    unsigned int parsed_index = 0U;
+    char trailing             = '\0';
+    if (sscanf(address, " %%%*[Ii]%*[Bb]%u %c", &parsed_index, &trailing) != 1 ||
+        parsed_index > UINT16_MAX)
+    {
+        return 0;
+    }
+
+    *index = (uint16_t)parsed_index;
+    return 1;
+}
+
+static void canopen_write_status(const char *address, bool ok)
+{
+    uint16_t index = 0U;
+    if (!canopen_parse_status_address(address, &index) || g_args.journal_write_byte == NULL)
+    {
+        return;
+    }
+
+    g_args.journal_write_byte(3, index, ok ? 0 : 1);
+}
+
+static bool canopen_slave_status(const canopen_slave_config_t *slave,
+                                 const canopen_runtime_bus_t *runtime)
+{
+    if (slave == NULL || runtime == NULL || runtime->co == NULL || !runtime->epoll_ready ||
+        !slave->enabled)
+    {
+        return false;
+    }
+
+    if (strcmp(slave->protection_mode, "heartbeat_producer") == 0)
+    {
+        if (runtime->co->HBcons == NULL)
+        {
+            return false;
+        }
+
+        for (uint8_t i = 0U; i < runtime->co->HBcons->numberOfMonitoredNodes; i++)
+        {
+            const CO_HBconsNode_t *node = &runtime->co->HBconsMonitoredNodes[i];
+            if (node->nodeId == slave->node_id)
+            {
+                return node->HBstate == CO_HBconsumer_ACTIVE &&
+                       node->NMTstate == CO_NMT_OPERATIONAL;
+            }
+        }
+        return false;
+    }
+
+#if ((CO_CONFIG_NODE_GUARDING) & CO_CONFIG_NODE_GUARDING_MASTER_ENABLE) != 0
+    if (runtime->co->NGmaster != NULL)
+    {
+        for (uint8_t i = 0U; i < CO_CONFIG_NODE_GUARDING_MASTER_COUNT; i++)
+        {
+            const CO_nodeGuardingMasterNode_t *node = &runtime->co->NGmaster->nodes[i];
+            if ((node->ident & 0x7FU) == slave->node_id)
+            {
+                return node->monitoringActive && node->NMTstate == CO_NMT_OPERATIONAL;
+            }
+        }
+    }
+#endif
+    return false;
+}
+
+static void canopen_update_status_outputs(const canopen_bus_config_t *bus,
+                                          canopen_runtime_bus_t *runtime)
+{
+    if (bus == NULL || runtime == NULL)
+    {
+        return;
+    }
+
+    const bool bus_ok    = runtime->fd >= 0 && runtime->epoll_ready;
+    const bool master_ok = runtime->initialized && runtime->co != NULL && runtime->epoll_ready;
+    canopen_write_status(bus->bus_status_plc_address, bus_ok);
+    canopen_write_status(bus->master_status_plc_address, master_ok);
+
+    for (int i = 0; i < bus->slave_count; i++)
+    {
+        const canopen_slave_config_t *slave = &bus->slaves[i];
+        canopen_write_status(slave->status_plc_address, canopen_slave_status(slave, runtime));
+    }
+}
+
 static int canopen_bus_plc_to_od(const canopen_bus_config_t *bus,
                                  const canopen_pdo_mapping_t *mapping)
 {
@@ -2389,6 +2486,8 @@ void cycle_end(void)
                 sync_canopen_bus_to_plc_image(bus);
             }
         }
+
+        canopen_update_status_outputs(bus, &g_runtime_buses[i]);
     }
 }
 
