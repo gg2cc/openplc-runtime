@@ -1353,10 +1353,9 @@ static void canopen_add_pdo_mapping_sdos(const canopen_slave_config_t *slave,
             continue;
         }
 
-        uint16_t comm_index = pdo->index; // 0x1400 - 0x1407
-        uint16_t map_index  = (uint16_t)(pdo->index + 0x200U); // 0x1600 - 0x1607
-        uint32_t cob_id = (uint32_t)(0x200U + ((uint32_t)(comm_index - 0x1400U) * 0x100U) +
-                                     slave->node_id);
+        uint16_t comm_index = pdo->index; // 0x1800 - 0x1807
+        uint16_t map_index  = (uint16_t)(pdo->index + 0x200U); // 0x1A00 - 0x1A07
+        uint32_t cob_id = (uint32_t)(0x180U + ((uint32_t)(comm_index - 0x1800U) * 0x100U) + slave->node_id);
 
         snprintf(entries[count].name, sizeof(entries[count].name), "rpdo_%d_map_count", p + 1);
         entries[count].index         = map_index;
@@ -1403,6 +1402,24 @@ static void canopen_add_pdo_mapping_sdos(const canopen_slave_config_t *slave,
         entries[count].data_type[1]  = '8';
         entries[count].default_value = 0xFF; // the transmission type of the RPDO
         count++;
+
+        snprintf(entries[count].name, sizeof(entries[count].name), "rpdo_%d_inhibit_time", p + 1);
+        entries[count].index         = comm_index;
+        entries[count].sub_index     = 3U;
+        entries[count].data_type[0]  = 'u';
+        entries[count].data_type[1]  = '1';
+        entries[count].data_type[2]  = '6';
+        entries[count].default_value = 500; // the inhibit time of the TPDO in milliseconds
+        count++;
+
+        snprintf(entries[count].name, sizeof(entries[count].name), "rpdo_%d_event_timer", p + 1);
+        entries[count].index         = comm_index;
+        entries[count].sub_index     = 5U;
+        entries[count].data_type[0]  = 'u';
+        entries[count].data_type[1]  = '1';
+        entries[count].data_type[2]  = '6';
+        entries[count].default_value = 0; // the event timer of the TPDO in milliseconds (0 means no event timer)
+        count++;
     }
 
     for (int p = 0; p < slave->tpdo_count; p++)
@@ -1413,10 +1430,9 @@ static void canopen_add_pdo_mapping_sdos(const canopen_slave_config_t *slave,
             continue;
         }
 
-        uint16_t comm_index = pdo->index;
-        uint16_t map_index  = (uint16_t)(pdo->index + 0x200U);
-        uint32_t cob_id = (uint32_t)(0x180U + ((uint32_t)(comm_index - 0x1800U) * 0x100U) +
-                                     slave->node_id);
+        uint16_t comm_index = pdo->index; // 0x1400 - 0x1407
+        uint16_t map_index  = (uint16_t)(pdo->index + 0x200U); // 0x1600 - 0x1607
+        uint32_t cob_id = (uint32_t)(0x200U + ((uint32_t)(comm_index - 0x1400U) * 0x100U) + slave->node_id);
 
         snprintf(entries[count].name, sizeof(entries[count].name), "tpdo_%d_map_count", p + 1);
         entries[count].index         = map_index;
@@ -1470,16 +1486,7 @@ static void canopen_add_pdo_mapping_sdos(const canopen_slave_config_t *slave,
         entries[count].data_type[0]  = 'u';
         entries[count].data_type[1]  = '1';
         entries[count].data_type[2]  = '6';
-        entries[count].default_value = 500; // the inhibit time of the TPDO in milliseconds
-        count++;
-
-        snprintf(entries[count].name, sizeof(entries[count].name), "tpdo_%d_event_timer", p + 1);
-        entries[count].index         = comm_index;
-        entries[count].sub_index     = 5U;
-        entries[count].data_type[0]  = 'u';
-        entries[count].data_type[1]  = '1';
-        entries[count].data_type[2]  = '6';
-        entries[count].default_value = 0; // the event timer of the TPDO in milliseconds (0 means no event timer)
+        entries[count].default_value = 0; // the inhibit time of the TPDO in milliseconds
         count++;
     }
 
