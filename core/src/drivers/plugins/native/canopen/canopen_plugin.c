@@ -40,9 +40,9 @@
 #define CANOPEN_NMT_CONTROL                                                                        \
     (CO_NMT_STARTUP_TO_OPERATIONAL | CO_NMT_ERR_ON_ERR_REG | CO_ERR_REG_GENERIC_ERR |              \
      CO_ERR_REG_COMMUNICATION)
-#define CANOPEN_LOCAL_RPDO_COUNT 4
+#define CANOPEN_LOCAL_RPDO_MAX 4
 #define CANOPEN_LOCAL_RPDO_MAX_MAPPINGS 8
-#define CANOPEN_LOCAL_TPDO_MAX 8
+#define CANOPEN_LOCAL_TPDO_MAX 4
 #define CANOPEN_LOCAL_TPDO_MAX_MAPPINGS 8
 
 static inline int canopen_min_int(int a, int b)
@@ -125,11 +125,10 @@ struct canopen_runtime_bus_s
     CO_epoll_t epoll;
     pthread_mutex_t stack_mutex;
     canopen_sdo_transaction_t sdo_transaction;
-    canopen_input_binding_t input_bindings[CANOPEN_LOCAL_RPDO_COUNT]
-                                          [CANOPEN_LOCAL_RPDO_MAX_MAPPINGS];
-    uint8_t input_binding_count[CANOPEN_LOCAL_RPDO_COUNT];
-    uint8_t input_rpdo_node_id[CANOPEN_LOCAL_RPDO_COUNT];
-    canopen_rpdo_callback_context_t rpdo_callback_context[CANOPEN_LOCAL_RPDO_COUNT];
+    canopen_input_binding_t input_bindings[CANOPEN_LOCAL_RPDO_MAX][CANOPEN_LOCAL_RPDO_MAX_MAPPINGS];
+    uint8_t input_binding_count[CANOPEN_LOCAL_RPDO_MAX];
+    uint8_t input_rpdo_node_id[CANOPEN_LOCAL_RPDO_MAX];
+    canopen_rpdo_callback_context_t rpdo_callback_context[CANOPEN_LOCAL_RPDO_MAX];
     canopen_output_tpdo_t output_tpdos[CANOPEN_LOCAL_TPDO_MAX];
     uint8_t output_tpdo_count;
 };
@@ -787,7 +786,7 @@ static void canopen_rpdo_signal_pre(void *object)
     const canopen_rpdo_callback_context_t *context =
         (const canopen_rpdo_callback_context_t *)object;
     if (context == NULL || context->runtime == NULL || context->runtime->co == NULL ||
-        context->rpdo_slot >= CANOPEN_LOCAL_RPDO_COUNT ||
+        context->rpdo_slot >= CANOPEN_LOCAL_RPDO_MAX ||
         context->runtime->input_binding_count[context->rpdo_slot] == 0U)
     {
         return;
@@ -868,7 +867,8 @@ static void canopen_configure_local_rpdos(const canopen_bus_config_t *bus,
         for (int p = 0; p < slave->rpdo_count; p++)
         {
             const canopen_pdo_t *pdo = &slave->rpdo[p];
-            if (pdo->index < 0x1800U || pdo->index >= 0x1804U || pdo->mapping_count <= 0)
+            if (pdo->index < 0x1800U || pdo->index >= (0x1800U + CANOPEN_LOCAL_RPDO_MAX) ||
+                pdo->mapping_count <= 0)
             {
                 continue;
             }
@@ -917,16 +917,15 @@ static void canopen_configure_local_rpdos(const canopen_bus_config_t *bus,
             }
 
             (void)OD_set_u8(OD_find(OD, (uint16_t)(0x1600U + slot)), 0U, map_count, true);
-            (void)OD_set_u32(OD_find(OD, (uint16_t)(0x1400U + slot)), 1U,
-                             (uint32_t)(0x180U + ((uint32_t)slot * 0x100U) + slave->node_id), true);
+            uint32_t cob_id = (uint32_t)(0x180U + ((uint32_t)slot * 0x100U) + slave->node_id);
+            (void)OD_set_u32(OD_find(OD, (uint16_t)(0x1400U + slot)), 1U, cob_id, true);
             (void)OD_set_u8(OD_find(OD, (uint16_t)(0x1400U + slot)), 2U, 0xFEU, true);
             (void)OD_set_u16(OD_find(OD, (uint16_t)(0x1400U + slot)), 5U, 0U, true);
 
             plugin_logger_info(&g_logger,
                                "CANopen local RPDO configured: bus=%s slave=%s slot=%u "
                                "source_tpdo=0x%04X cob_id=0x%03X mappings=%u inputs=%u",
-                               bus->name, slave->name, slot, pdo->index,
-                               (unsigned)(0x180U + ((uint32_t)slot * 0x100U) + slave->node_id),
+                               bus->name, slave->name, slot, pdo->index, (unsigned)cob_id,
                                map_count, runtime->input_binding_count[slot]);
         }
     }
@@ -1057,16 +1056,8 @@ static void canopen_configure_local_tpdos(const canopen_bus_config_t *bus,
             }
 
             uint16_t comm_index = pdo->index;
-            uint32_t cob_id     = 0U;
-            if (comm_index >= 0x1400U && comm_index <= 0x1407U)
-            {
-                cob_id = (uint32_t)(0x200U + ((uint32_t)(comm_index - 0x1400U) * 0x100U) +
-                                    slave->node_id);
-            }
-            else
-            {
-                cob_id = (uint32_t)(0x200U + slave->node_id);
-            }
+            uint32_t cob_id =
+                (uint32_t)(0x200U + ((uint32_t)(comm_index - 0x1400U) * 0x100U) + slave->node_id);
 
             canopen_output_tpdo_t *tpdo = &runtime->output_tpdos[runtime->output_tpdo_count];
             tpdo->valid                 = true;
@@ -1642,13 +1633,14 @@ static void canopen_add_pdo_mapping_sdos(const canopen_slave_config_t *slave,
     for (int p = 0; p < slave->rpdo_count; p++)
     {
         const canopen_pdo_t *pdo = &slave->rpdo[p];
-        if (pdo == NULL || pdo->mapping_count <= 0)
+        if (pdo == NULL || pdo->index < 0x1800U ||
+            pdo->index >= (0x1800U + CANOPEN_LOCAL_RPDO_MAX) || pdo->mapping_count <= 0)
         {
             continue;
         }
 
-        uint16_t comm_index = pdo->index;                      // 0x1800 - 0x1807
-        uint16_t map_index  = (uint16_t)(pdo->index + 0x200U); // 0x1A00 - 0x1A07
+        uint16_t comm_index = pdo->index;                      // 0x1800 - 0x180*
+        uint16_t map_index  = (uint16_t)(pdo->index + 0x200U); // 0x1A00 - 0x1A0*
         uint32_t cob_id =
             (uint32_t)(0x180U + ((uint32_t)(comm_index - 0x1800U) * 0x100U) + slave->node_id);
 
@@ -1724,13 +1716,14 @@ static void canopen_add_pdo_mapping_sdos(const canopen_slave_config_t *slave,
     for (int p = 0; p < slave->tpdo_count; p++)
     {
         const canopen_pdo_t *pdo = &slave->tpdo[p];
-        if (pdo == NULL || pdo->mapping_count <= 0)
+        if (pdo == NULL || pdo->index < 0x1400U ||
+            pdo->index >= (0x1400U + CANOPEN_LOCAL_TPDO_MAX) || pdo->mapping_count <= 0)
         {
             continue;
         }
 
-        uint16_t comm_index = pdo->index;                      // 0x1400 - 0x1407
-        uint16_t map_index  = (uint16_t)(pdo->index + 0x200U); // 0x1600 - 0x1607
+        uint16_t comm_index = pdo->index;                      // 0x1400 - 0x140*
+        uint16_t map_index  = (uint16_t)(pdo->index + 0x200U); // 0x1600 - 0x160*
         uint32_t cob_id =
             (uint32_t)(0x200U + ((uint32_t)(comm_index - 0x1400U) * 0x100U) + slave->node_id);
 
@@ -1886,7 +1879,8 @@ static void canopen_send_configured_sdos(const canopen_bus_config_t *bus,
             }
         }
 
-        canopen_sdo_entry_t generated_sdos[64];
+        canopen_sdo_entry_t generated_sdos[(CANOPEN_LOCAL_RPDO_MAX + CANOPEN_LOCAL_TPDO_MAX) *
+                                           (CANOPEN_LOCAL_RPDO_MAX_MAPPINGS + 4U)];
         int generated_sdo_count = 0;
         memset(generated_sdos, 0, sizeof(generated_sdos));
         canopen_add_pdo_mapping_sdos(slave, generated_sdos, &generated_sdo_count);
@@ -2127,7 +2121,7 @@ static int init_runtime_bus(const canopen_bus_config_t *bus, int bus_index)
         "CANopen init sequence: step=PDO_init OK bus=%s node_id=%u tpdo_count=%d rpdo_count=%d",
         bus->name, g_runtime_buses[bus_index].node_id, bus->tpdo_count, bus->rpdo_count);
 
-    for (uint8_t slot = 0U; slot < CANOPEN_LOCAL_RPDO_COUNT; slot++)
+    for (uint8_t slot = 0U; slot < CANOPEN_LOCAL_RPDO_MAX; slot++)
     {
         if (g_runtime_buses[bus_index].input_binding_count[slot] == 0U)
         {
