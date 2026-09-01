@@ -42,6 +42,8 @@
      CO_ERR_REG_COMMUNICATION)
 #define CANOPEN_LOCAL_RPDO_COUNT 4
 #define CANOPEN_LOCAL_RPDO_MAX_MAPPINGS 8
+#define CANOPEN_LOCAL_TPDO_MAX 8
+#define CANOPEN_LOCAL_TPDO_MAX_MAPPINGS 8
 
 static inline int canopen_min_int(int a, int b)
 {
@@ -80,6 +82,25 @@ typedef struct
 
 typedef struct
 {
+    bool valid;
+    uint16_t bit_offset;
+    uint16_t bit_length;
+    uint16_t plc_index;
+    uint8_t plc_bit;
+    uint8_t plc_type;
+} canopen_output_field_t;
+
+typedef struct
+{
+    bool valid;
+    uint32_t cob_id;
+    uint8_t dlc;
+    uint8_t field_count;
+    canopen_output_field_t fields[CANOPEN_LOCAL_TPDO_MAX_MAPPINGS];
+} canopen_output_tpdo_t;
+
+typedef struct
+{
     canopen_runtime_bus_t *runtime;
     uint8_t rpdo_slot;
 } canopen_rpdo_callback_context_t;
@@ -109,6 +130,8 @@ struct canopen_runtime_bus_s
     uint8_t input_binding_count[CANOPEN_LOCAL_RPDO_COUNT];
     uint8_t input_rpdo_node_id[CANOPEN_LOCAL_RPDO_COUNT];
     canopen_rpdo_callback_context_t rpdo_callback_context[CANOPEN_LOCAL_RPDO_COUNT];
+    canopen_output_tpdo_t output_tpdos[CANOPEN_LOCAL_TPDO_MAX];
+    uint8_t output_tpdo_count;
 };
 
 static int canopen_parse_iec_address(const char *address, char *prefix, size_t prefix_len,
@@ -119,6 +142,10 @@ static bool canopen_has_node_guarding_slaves(const canopen_bus_config_t *bus);
 static bool canopen_configure_node_guarding(const canopen_bus_config_t *bus, CO_t *co);
 static void canopen_rpdo_signal_pre(void *object);
 static void canopen_configure_local_rpdos(const canopen_bus_config_t *bus,
+                                          canopen_runtime_bus_t *runtime);
+static void canopen_configure_local_tpdos(const canopen_bus_config_t *bus,
+                                          canopen_runtime_bus_t *runtime);
+static void sync_plc_image_to_canopen_bus(const canopen_bus_config_t *bus,
                                           canopen_runtime_bus_t *runtime);
 
 static plugin_runtime_args_t g_args;
@@ -905,6 +932,271 @@ static void canopen_configure_local_rpdos(const canopen_bus_config_t *bus,
     }
 }
 
+static bool canopen_prepare_output_binding(const canopen_pdo_mapping_t *mapping, int buffer_size,
+                                           canopen_output_field_t *binding)
+{
+    if (mapping == NULL || binding == NULL || !mapping->bound || mapping->plc_address[0] == '\0' ||
+        mapping->direction[0] == '\0' || strcasecmp(mapping->direction, "output") != 0)
+    {
+        return false;
+    }
+
+    char prefix[4] = {0};
+    int iec_index  = 0;
+    int iec_bit    = 0;
+    if (!canopen_parse_iec_address(mapping->plc_address, prefix, sizeof(prefix), &iec_index,
+                                   &iec_bit) ||
+        iec_index < 0 || iec_index >= buffer_size || iec_bit < 0)
+    {
+        return false;
+    }
+
+    char address[64] = {0};
+    if (sscanf(mapping->plc_address, "%63s", address) != 1 ||
+        (strncasecmp(address, "%QX", 3) != 0 && strncasecmp(address, "%QB", 3) != 0 &&
+         strncasecmp(address, "%QW", 3) != 0 && strncasecmp(address, "%QD", 3) != 0 &&
+         strncasecmp(address, "%QL", 3) != 0))
+    {
+        return false;
+    }
+
+    uint16_t default_length = 0U;
+    uint8_t plc_type        = 0U;
+    if (strncasecmp(address, "%QX", 3) == 0)
+    {
+        if (iec_bit >= 8)
+        {
+            return false;
+        }
+        default_length = 1U;
+        plc_type       = 0U;
+    }
+    else if (strncasecmp(address, "%QB", 3) == 0)
+    {
+        default_length = 8U;
+        plc_type       = 3U;
+    }
+    else if (strncasecmp(address, "%QW", 3) == 0)
+    {
+        default_length = 16U;
+        plc_type       = 5U;
+    }
+    else if (strncasecmp(address, "%QD", 3) == 0)
+    {
+        default_length = 32U;
+        plc_type       = 8U;
+    }
+    else
+    {
+        default_length = 64U;
+        plc_type       = 11U;
+    }
+
+    uint16_t bit_length = mapping->bit_length != 0U ? mapping->bit_length : default_length;
+    if (bit_length == 0U || bit_length > 64U || (bit_length > 1U && (bit_length & 0x07U) != 0U))
+    {
+        return false;
+    }
+
+    binding->valid      = true;
+    binding->bit_offset = 0U;
+    binding->bit_length = bit_length;
+    binding->plc_index  = (uint16_t)iec_index;
+    binding->plc_bit    = (uint8_t)iec_bit;
+    binding->plc_type   = plc_type;
+    return true;
+}
+
+static void canopen_write_tpdo_bits(uint8_t *payload, uint16_t bit_offset, uint16_t bit_length,
+                                    uint64_t value)
+{
+    if (payload == NULL || bit_length == 0U || bit_length > 64U)
+    {
+        return;
+    }
+
+    for (uint16_t bit = 0U; bit < bit_length; bit++)
+    {
+        uint16_t target_bit = (uint16_t)(bit_offset + bit);
+        if ((value & ((uint64_t)1U << bit)) != 0U)
+        {
+            payload[target_bit >> 3U] |= (uint8_t)(1U << (target_bit & 0x07U));
+        }
+        else
+        {
+            payload[target_bit >> 3U] &= (uint8_t)~(1U << (target_bit & 0x07U));
+        }
+    }
+}
+
+static void canopen_configure_local_tpdos(const canopen_bus_config_t *bus,
+                                          canopen_runtime_bus_t *runtime)
+{
+    if (bus == NULL || runtime == NULL)
+    {
+        return;
+    }
+
+    memset(runtime->output_tpdos, 0, sizeof(runtime->output_tpdos));
+    runtime->output_tpdo_count = 0U;
+
+    for (int s = 0; s < bus->slave_count; s++)
+    {
+        const canopen_slave_config_t *slave = &bus->slaves[s];
+        if (!slave->enabled || slave->node_id == 0U || slave->node_id > 127U)
+        {
+            continue;
+        }
+
+        for (int p = 0; p < slave->tpdo_count; p++)
+        {
+            const canopen_pdo_t *pdo = &slave->tpdo[p];
+            if (pdo->mapping_count <= 0 || runtime->output_tpdo_count >= CANOPEN_LOCAL_TPDO_MAX)
+            {
+                continue;
+            }
+
+            uint16_t comm_index = pdo->index;
+            uint32_t cob_id     = 0U;
+            if (comm_index >= 0x1400U && comm_index <= 0x1407U)
+            {
+                cob_id = (uint32_t)(0x200U + ((uint32_t)(comm_index - 0x1400U) * 0x100U) +
+                                    slave->node_id);
+            }
+            else
+            {
+                cob_id = (uint32_t)(0x200U + slave->node_id);
+            }
+
+            canopen_output_tpdo_t *tpdo = &runtime->output_tpdos[runtime->output_tpdo_count];
+            tpdo->valid                 = true;
+            tpdo->cob_id                = cob_id;
+            tpdo->field_count           = 0U;
+            uint16_t bit_offset         = 0U;
+
+            uint8_t map_count =
+                (uint8_t)canopen_min_int(pdo->mapping_count, CANOPEN_LOCAL_TPDO_MAX_MAPPINGS);
+            for (uint8_t m = 0U; m < map_count; m++)
+            {
+                const canopen_pdo_mapping_t *mapping = &pdo->mapping[m];
+                canopen_output_field_t *field        = &tpdo->fields[tpdo->field_count];
+                if (canopen_prepare_output_binding(mapping, g_args.buffer_size, field))
+                {
+                    field->bit_offset = bit_offset;
+                    tpdo->field_count++;
+                }
+                bit_offset = (uint16_t)(bit_offset + mapping->bit_length);
+            }
+
+            tpdo->dlc = (uint8_t)canopen_min_int((bit_offset + 7U) / 8U, 8);
+            if (tpdo->dlc == 0U)
+            {
+                tpdo->dlc = 8U;
+            }
+
+            plugin_logger_info(&g_logger,
+                               "CANopen local TPDO output configured: bus=%s slave=%s pdo=%s "
+                               "cob_id=0x%03X dlc=%u outputs=%u",
+                               bus->name, slave->name, pdo->name, (unsigned)tpdo->cob_id, tpdo->dlc,
+                               tpdo->field_count);
+
+            runtime->output_tpdo_count++;
+        }
+    }
+}
+
+static void sync_plc_image_to_canopen_bus(const canopen_bus_config_t *bus,
+                                          canopen_runtime_bus_t *runtime)
+{
+    if (bus == NULL || runtime == NULL || runtime->fd < 0 || runtime->output_tpdo_count == 0U ||
+        g_args.buffer_size <= 0)
+    {
+        return;
+    }
+
+    uint8_t payloads[CANOPEN_LOCAL_TPDO_MAX][8];
+    memset(payloads, 0, sizeof(payloads));
+
+    if (g_args.image_lock)
+    {
+        g_args.image_lock();
+    }
+
+    for (uint8_t p = 0U; p < runtime->output_tpdo_count; p++)
+    {
+        const canopen_output_tpdo_t *tpdo = &runtime->output_tpdos[p];
+        if (!tpdo->valid || tpdo->field_count == 0U)
+        {
+            continue;
+        }
+
+        for (uint8_t f = 0U; f < tpdo->field_count; f++)
+        {
+            const canopen_output_field_t *field = &tpdo->fields[f];
+            if (!field->valid)
+            {
+                continue;
+            }
+
+            uint64_t value = 0U;
+            switch (field->plc_type)
+            {
+            case 0U: // BOOL
+                if (g_args.bool_output != NULL && g_args.bool_output[field->plc_index] != NULL &&
+                    g_args.bool_output[field->plc_index][field->plc_bit] != NULL)
+                {
+                    value = *g_args.bool_output[field->plc_index][field->plc_bit] ? 1U : 0U;
+                }
+                break;
+            case 3U: // BYTE
+                if (g_args.byte_output != NULL && g_args.byte_output[field->plc_index] != NULL)
+                {
+                    value = (uint64_t)*g_args.byte_output[field->plc_index];
+                }
+                break;
+            case 5U: // INT/UINT
+                if (g_args.int_output != NULL && g_args.int_output[field->plc_index] != NULL)
+                {
+                    value = (uint64_t)*g_args.int_output[field->plc_index];
+                }
+                break;
+            case 8U: // DINT/UDINT
+                if (g_args.dint_output != NULL && g_args.dint_output[field->plc_index] != NULL)
+                {
+                    value = (uint64_t)*g_args.dint_output[field->plc_index];
+                }
+                break;
+            case 11U: // LINT/ULINT
+                if (g_args.lint_output != NULL && g_args.lint_output[field->plc_index] != NULL)
+                {
+                    value = (uint64_t)*g_args.lint_output[field->plc_index];
+                }
+                break;
+            default:
+                break;
+            }
+
+            canopen_write_tpdo_bits(payloads[p], field->bit_offset, field->bit_length, value);
+        }
+    }
+
+    if (g_args.image_unlock)
+    {
+        g_args.image_unlock();
+    }
+
+    for (uint8_t p = 0U; p < runtime->output_tpdo_count; p++)
+    {
+        const canopen_output_tpdo_t *tpdo = &runtime->output_tpdos[p];
+        if (!tpdo->valid || tpdo->field_count == 0U)
+        {
+            continue;
+        }
+
+        can_socket_write(runtime->fd, tpdo->cob_id, false, false, tpdo->dlc, payloads[p]);
+    }
+}
+
 static void apply_od_pdo_defaults(const canopen_bus_config_t *bus, canopen_runtime_bus_t *runtime)
 {
     if (bus == NULL || runtime == NULL)
@@ -926,6 +1218,7 @@ static void apply_od_pdo_defaults(const canopen_bus_config_t *bus, canopen_runti
     OD_PERSIST_COMM.x1018_identity.serialNumber   = bus->sync_period_ms;
 
     canopen_configure_local_rpdos(bus, runtime);
+    canopen_configure_local_tpdos(bus, runtime);
 }
 
 static int canopen_parse_iec_address(const char *address, char *prefix, size_t prefix_len,
@@ -2007,6 +2300,7 @@ void cycle_end(void)
             /* Exchange PDO process image when slave node(s) are confirmed in Operational state */
             if (g_runtime_buses[i].startup_confirmed)
             {
+                sync_plc_image_to_canopen_bus(bus, &g_runtime_buses[i]);
                 sync_canopen_bus_to_plc_image(bus);
             }
         }
