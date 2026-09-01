@@ -195,6 +195,7 @@ struct canopen_runtime_bus_s
     bool initialized;
     bool epoll_ready;
     bool startup_confirmed;
+    bool communication_fault;
     bool reconnect_required;
     bool bootup_seen;
     bool startup_sdo_sent;
@@ -641,9 +642,14 @@ static void canopen_start_configured_slaves(const canopen_bus_config_t *bus, CO_
             if (err == CO_ERROR_NO)
             {
                 reset_sent = true;
+                runtime->communication_fault = false;
                 plugin_logger_info(&g_logger,
                                    "NMT Reset Node sent: bus=%s slave=%s node_id=%u command=0x81",
                                    bus->name, slave->name, slave->node_id);
+            }
+            else
+            {
+                runtime->communication_fault = true;
             }
         }
 
@@ -669,10 +675,15 @@ static void canopen_start_configured_slaves(const canopen_bus_config_t *bus, CO_
         pthread_mutex_unlock(&runtime->stack_mutex);
         if (err == CO_ERROR_NO)
         {
+            runtime->communication_fault = false;
             plugin_logger_info(
                 &g_logger,
                 "NMT Enter Pre-Operational sent: bus=%s slave=%s node_id=%u command=0x80",
                 bus->name, slave->name, slave->node_id);
+        }
+        else
+        {
+            runtime->communication_fault = true;
         }
     }
 
@@ -705,12 +716,14 @@ static void canopen_start_configured_slaves(const canopen_bus_config_t *bus, CO_
         pthread_mutex_unlock(&runtime->stack_mutex);
         if (err != CO_ERROR_NO)
         {
+            runtime->communication_fault = true;
             plugin_logger_warn(&g_logger, "NMT Start failed for bus=%s slave=%s node_id=%u err=%d",
                                bus->name, slave->name, slave->node_id, err);
             continue;
         }
 
         started++;
+        runtime->communication_fault = false;
         plugin_logger_info(&g_logger, "NMT Start sent: bus=%s slave=%s node_id=%u command=0x01",
                            bus->name, slave->name, slave->node_id);
     }
@@ -751,7 +764,14 @@ static void *canopen_linux_runtime_worker_proc(void *arg)
             CO_epoll_processMain(&runtime->epoll, runtime->co, true, &reset);
             CO_epoll_processRT(&runtime->epoll, runtime->co, false);
             CO_epoll_processLast(&runtime->epoll);
+
+            canopen_runtime_lifecycle_tick(&g_config.buses[i], runtime);
             pthread_mutex_unlock(&runtime->stack_mutex);
+
+            if (runtime->reconnect_required || !runtime->startup_confirmed)
+            {
+                canopen_start_configured_slaves(&g_config.buses[i], runtime->co, runtime);
+            }
         }
 
         if (!any_bus_ready)
@@ -1439,8 +1459,9 @@ static void canopen_update_status_outputs(const canopen_bus_config_t *bus,
         return;
     }
 
-    const bool bus_ok    = runtime->fd >= 0 && runtime->epoll_ready;
-    const bool master_ok = runtime->initialized && runtime->co != NULL && runtime->epoll_ready;
+    const bool bus_ok = runtime->fd >= 0 && runtime->epoll_ready && !runtime->communication_fault;
+    const bool master_ok = runtime->initialized && runtime->co != NULL && runtime->epoll_ready &&
+                           !runtime->communication_fault;
     canopen_write_status(bus->bus_status_plc_address, bus_ok);
     canopen_write_status(bus->master_status_plc_address, master_ok);
 
@@ -2468,17 +2489,6 @@ void cycle_end(void)
 
         if (g_runtime_buses[i].initialized && g_runtime_buses[i].co != NULL)
         {
-            pthread_mutex_lock(&g_runtime_buses[i].stack_mutex);
-            canopen_runtime_lifecycle_tick(bus, &g_runtime_buses[i]);
-            pthread_mutex_unlock(&g_runtime_buses[i].stack_mutex);
-
-            bool needs_start =
-                g_runtime_buses[i].reconnect_required || !g_runtime_buses[i].startup_confirmed;
-            if (needs_start)
-            {
-                canopen_start_configured_slaves(bus, g_runtime_buses[i].co, &g_runtime_buses[i]);
-            }
-
             /* Exchange PDO process image when slave node(s) are confirmed in Operational state */
             if (g_runtime_buses[i].startup_confirmed)
             {
