@@ -29,6 +29,11 @@ extern "C"
 
     typedef enum
     {
+        CAN_BYTE_ORDER_LITTLE = 0,
+        CAN_BYTE_ORDER_BIG    = 1
+    } can_byte_order_t;
+    typedef enum
+    {
         CAN_DATA_BOOL = 0,
         CAN_DATA_U8,
         CAN_DATA_I8,
@@ -57,6 +62,7 @@ extern "C"
         bool eff;    /* Extended Frame Format (29-bit ID) */
         bool rtr;    /* Remote Transmission Request */
         uint8_t dlc; /* Data Length Code (0..8) */
+        can_byte_order_t byte_order;
         int mapping_count;
         can_mapping_t mappings[MAX_CAN_MAPPINGS_PER_FRAME];
     } can_rx_frame_config_t;
@@ -66,6 +72,7 @@ extern "C"
         uint32_t can_id;
         bool eff; /* Extended Frame Format */
         uint8_t dlc;
+        can_byte_order_t byte_order;
         can_tx_trigger_t trigger;
         uint32_t cycle_time_ms;
         uint64_t last_send_time_ms;

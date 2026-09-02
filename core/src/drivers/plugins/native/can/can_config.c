@@ -108,6 +108,25 @@ static uint32_t parse_hex_or_dec(const char *str)
     return (uint32_t)strtoul(str, NULL, 10);
 }
 
+static int parse_byte_order(cJSON *item, can_byte_order_t *byte_order)
+{
+    if (!byte_order)
+        return -1;
+    *byte_order = CAN_BYTE_ORDER_LITTLE;
+    if (!item)
+        return 0;
+    if (!cJSON_IsString(item) || !item->valuestring)
+        return -1;
+    if (strcasecmp(item->valuestring, "little") == 0)
+        return 0;
+    if (strcasecmp(item->valuestring, "big") == 0)
+    {
+        *byte_order = CAN_BYTE_ORDER_BIG;
+        return 0;
+    }
+    return -1;
+}
+
 void can_config_init_defaults(can_config_t *config)
 {
     if (!config)
@@ -279,6 +298,12 @@ static int parse_rx_frames(cJSON *rx_arr, can_interface_config_t *iface, plugin_
         cJSON *dlc = cJSON_GetObjectItem(item, "dlc");
         frame->dlc = (dlc && cJSON_IsNumber(dlc)) ? (uint8_t)dlc->valueint : 8;
 
+        if (parse_byte_order(cJSON_GetObjectItem(item, "byte_order"), &frame->byte_order) != 0)
+        {
+            plugin_logger_error(logger, "Invalid RX frame byte_order at index %d", i);
+            return -1;
+        }
+
         cJSON *mappings = cJSON_GetObjectItem(item, "mappings");
         if (frame->dlc > 8 || parse_mappings(mappings, frame->mappings, &frame->mapping_count, true,
                                              frame->dlc, logger) != 0)
@@ -328,6 +353,12 @@ static int parse_tx_frames(cJSON *tx_arr, can_interface_config_t *iface, plugin_
 
         cJSON *dlc = cJSON_GetObjectItem(item, "dlc");
         frame->dlc = (dlc && cJSON_IsNumber(dlc)) ? (uint8_t)dlc->valueint : 8;
+
+        if (parse_byte_order(cJSON_GetObjectItem(item, "byte_order"), &frame->byte_order) != 0)
+        {
+            plugin_logger_error(logger, "Invalid TX frame byte_order at index %d", i);
+            return -1;
+        }
 
         cJSON *trig = cJSON_GetObjectItem(item, "trigger");
         if (cJSON_IsString(trig) && strcasecmp(trig->valuestring, "on_change") == 0)

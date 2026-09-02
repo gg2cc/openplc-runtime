@@ -38,6 +38,38 @@ static int mapping_width(can_data_type_t type)
                                                                                   : 8;
 }
 
+static uint64_t load_payload_value(const uint8_t *payload, int offset, int width,
+                                   can_byte_order_t byte_order)
+{
+    uint64_t value = 0;
+    if (byte_order == CAN_BYTE_ORDER_BIG)
+    {
+        for (int byte = 0; byte < width; byte++)
+            value = (value << 8) | payload[offset + byte];
+    }
+    else
+    {
+        for (int byte = 0; byte < width; byte++)
+            value |= (uint64_t)payload[offset + byte] << (byte * 8);
+    }
+    return value;
+}
+
+static void store_payload_value(uint8_t *payload, int offset, int width, uint64_t value,
+                                can_byte_order_t byte_order)
+{
+    if (byte_order == CAN_BYTE_ORDER_BIG)
+    {
+        for (int byte = 0; byte < width; byte++)
+            payload[offset + byte] = (uint8_t)(value >> ((width - byte - 1) * 8));
+    }
+    else
+    {
+        for (int byte = 0; byte < width; byte++)
+            payload[offset + byte] = (uint8_t)(value >> (byte * 8));
+    }
+}
+
 /* Performance counters for get_stats */
 static uint64_t g_rx_count                               = 0;
 static uint64_t g_tx_count                               = 0;
@@ -180,8 +212,8 @@ static void *can_rx_thread_proc(void *arg)
                         case CAN_DATA_U16:
                         case CAN_DATA_I16:
                         {
-                            uint16_t val = (uint16_t)payload[m->byte_offset] |
-                                           ((uint16_t)payload[m->byte_offset + 1] << 8);
+                            uint16_t val = (uint16_t)load_payload_value(
+                                payload, m->byte_offset, 2, frame->byte_order);
                             if (g_args.journal_write_int)
                                 g_args.journal_write_int(m->journal_type, m->plc_index, (int)val);
                             break;
@@ -190,10 +222,8 @@ static void *can_rx_thread_proc(void *arg)
                         case CAN_DATA_I32:
                         case CAN_DATA_F32:
                         {
-                            uint32_t val = (uint32_t)payload[m->byte_offset] |
-                                           ((uint32_t)payload[m->byte_offset + 1] << 8) |
-                                           ((uint32_t)payload[m->byte_offset + 2] << 16) |
-                                           ((uint32_t)payload[m->byte_offset + 3] << 24);
+                            uint32_t val = (uint32_t)load_payload_value(
+                                payload, m->byte_offset, 4, frame->byte_order);
                             if (g_args.journal_write_dint)
                                 g_args.journal_write_dint(m->journal_type, m->plc_index, val);
                             break;
@@ -202,9 +232,8 @@ static void *can_rx_thread_proc(void *arg)
                         case CAN_DATA_I64:
                         case CAN_DATA_F64:
                         {
-                            uint64_t val = 0;
-                            for (int byte = 0; byte < 8; byte++)
-                                val |= (uint64_t)payload[m->byte_offset + byte] << (byte * 8);
+                            uint64_t val = load_payload_value(payload, m->byte_offset, 8,
+                                                               frame->byte_order);
                             if (g_args.journal_write_lint)
                                 g_args.journal_write_lint(m->journal_type, m->plc_index, val);
                             break;
@@ -397,9 +426,8 @@ void cycle_end(void)
                 {
                     if (g_args.int_output && m->plc_index < g_args.buffer_size)
                     {
-                        IEC_UINT val                = *g_args.int_output[m->plc_index];
-                        payload[m->byte_offset]     = val & 0xFF;
-                        payload[m->byte_offset + 1] = (val >> 8) & 0xFF;
+                        IEC_UINT val = *g_args.int_output[m->plc_index];
+                        store_payload_value(payload, m->byte_offset, 2, val, frame->byte_order);
                     }
                     break;
                 }
@@ -409,11 +437,8 @@ void cycle_end(void)
                 {
                     if (g_args.dint_output && m->plc_index < g_args.buffer_size)
                     {
-                        IEC_UDINT val               = *g_args.dint_output[m->plc_index];
-                        payload[m->byte_offset]     = val & 0xFF;
-                        payload[m->byte_offset + 1] = (val >> 8) & 0xFF;
-                        payload[m->byte_offset + 2] = (val >> 16) & 0xFF;
-                        payload[m->byte_offset + 3] = (val >> 24) & 0xFF;
+                        IEC_UDINT val = *g_args.dint_output[m->plc_index];
+                        store_payload_value(payload, m->byte_offset, 4, val, frame->byte_order);
                     }
                     break;
                 }
@@ -424,8 +449,7 @@ void cycle_end(void)
                     if (g_args.lint_output && m->plc_index < g_args.buffer_size)
                     {
                         IEC_ULINT val = *g_args.lint_output[m->plc_index];
-                        for (int byte = 0; byte < 8; byte++)
-                            payload[m->byte_offset + byte] = (uint8_t)(val >> (byte * 8));
+                        store_payload_value(payload, m->byte_offset, 8, val, frame->byte_order);
                     }
                     break;
                 }
