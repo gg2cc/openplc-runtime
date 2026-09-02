@@ -138,6 +138,11 @@ static void *can_rx_thread_proc(void *arg)
                 continue;
             }
 
+            if (res > 0)
+            {
+                continue;
+            }
+
             g_rx_count++;
             g_rx_count_by_iface[iface_idx]++;
             g_last_rx_ms[iface_idx] = get_time_ms();
