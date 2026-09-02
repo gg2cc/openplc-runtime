@@ -608,8 +608,8 @@ static void canopen_start_configured_slaves(const canopen_bus_config_t *bus, CO_
     if (!can_netlink_is_up(bus->interface))
     {
         runtime->communication_fault = true;
-        runtime->startup_confirmed = false;
-        runtime->reconnect_required = true;
+        runtime->startup_confirmed   = false;
+        runtime->reconnect_required  = true;
         return;
     }
 
@@ -649,7 +649,7 @@ static void canopen_start_configured_slaves(const canopen_bus_config_t *bus, CO_
             pthread_mutex_unlock(&runtime->stack_mutex);
             if (err == CO_ERROR_NO)
             {
-                reset_sent = true;
+                reset_sent                   = true;
                 runtime->communication_fault = false;
                 plugin_logger_info(&g_logger,
                                    "NMT Reset Node sent: bus=%s slave=%s node_id=%u command=0x81",
@@ -665,7 +665,7 @@ static void canopen_start_configured_slaves(const canopen_bus_config_t *bus, CO_
         if (runtime->communication_fault)
         {
             runtime->startup_reset_sent = false;
-            runtime->last_start_ms = now_ms;
+            runtime->last_start_ms      = now_ms;
             return;
         }
         if (reset_sent)
@@ -698,8 +698,8 @@ static void canopen_start_configured_slaves(const canopen_bus_config_t *bus, CO_
         else
         {
             runtime->communication_fault = true;
-            runtime->last_start_ms = now_ms;
-            runtime->startup_reset_sent = false;
+            runtime->last_start_ms       = now_ms;
+            runtime->startup_reset_sent  = false;
             return;
         }
     }
@@ -713,7 +713,7 @@ static void canopen_start_configured_slaves(const canopen_bus_config_t *bus, CO_
         if (!canopen_send_configured_sdos(bus, runtime))
         {
             runtime->startup_sdo_sent = false;
-            runtime->last_start_ms = now_ms;
+            runtime->last_start_ms    = now_ms;
             return;
         }
         runtime->startup_sdo_sent = true;
@@ -1332,9 +1332,9 @@ static void apply_od_pdo_defaults(const canopen_bus_config_t *bus, canopen_runti
         return;
     }
 
-    plugin_logger_info(
-        &g_logger, "apply_od_pdo_defaults: bus=%s slave_count=%d bus_tpdo=%d bus_rpdo=%d",
-        bus->name, bus->slave_count, bus->tpdo_count, bus->rpdo_count);
+    plugin_logger_info(&g_logger,
+                       "apply_od_pdo_defaults: bus=%s slave_count=%d bus_tpdo=%d bus_rpdo=%d",
+                       bus->name, bus->slave_count, bus->tpdo_count, bus->rpdo_count);
 
     const uint16_t local_node_id = bus->local_node_id > 0U ? bus->local_node_id : 0x7FU;
 
@@ -2189,10 +2189,9 @@ static int init_runtime_bus(const canopen_bus_config_t *bus, int bus_index)
     {
         const canopen_slave_config_t *slave = &bus->slaves[s];
         plugin_logger_info(
-            &g_logger,
-            "Bus[%d] slave[%d]: name=%s node_id=%u enabled=%d tpdo=%d rpdo=%d sdo=%d",
-            bus_index, s, slave->name, slave->node_id, slave->enabled,
-            slave->tpdo_count, slave->rpdo_count, slave->sdo_count);
+            &g_logger, "Bus[%d] slave[%d]: name=%s node_id=%u enabled=%d tpdo=%d rpdo=%d sdo=%d",
+            bus_index, s, slave->name, slave->node_id, slave->enabled, slave->tpdo_count,
+            slave->rpdo_count, slave->sdo_count);
         for (int i = 0; i < slave->tpdo_count; i++)
         {
             plugin_logger_info(&g_logger,
@@ -2417,10 +2416,9 @@ static int init_runtime_bus(const canopen_bus_config_t *bus, int bus_index)
 
     plugin_logger_info(&g_logger,
                        "CANopen runtime bound: bus=%s interface=%s local_node_id=%u bitrate=%u "
-                         "tpdo=%d rpdo=%d socket_fd=%d",
-                       bus->name, bus->interface, bus->local_node_id, bus->bitrate,
-                         bus->tpdo_count, bus->rpdo_count,
-                       g_runtime_buses[bus_index].fd);
+                       "tpdo=%d rpdo=%d socket_fd=%d",
+                       bus->name, bus->interface, bus->local_node_id, bus->bitrate, bus->tpdo_count,
+                       bus->rpdo_count, g_runtime_buses[bus_index].fd);
     return 0;
 }
 
@@ -2486,9 +2484,9 @@ int start_loop(void)
         }
         plugin_logger_info(&g_logger,
                            "Bus[%d]: name=%s interface=%s local_node_id=%u bitrate=%u "
-                            "tpdo=%d rpdo=%d",
+                           "tpdo=%d rpdo=%d",
                            i, bus->name, bus->interface, bus->local_node_id, bus->bitrate,
-                            bus->tpdo_count, bus->rpdo_count);
+                           bus->tpdo_count, bus->rpdo_count);
     }
 
     if (g_runtime_bus_count > 0)
@@ -2579,172 +2577,141 @@ void cleanup(void)
     canopen_config_free(&g_config);
 }
 
-int execute_command(const char *command_json, char *response, size_t response_size)
+static const char *canopen_bus_status(const canopen_bus_config_t *bus,
+                                      const canopen_runtime_bus_t *runtime)
 {
-    if (!response || response_size == 0)
+    if (bus == NULL || runtime == NULL || !bus->enabled)
+    {
+        return "Disabled";
+    }
+    if (runtime->communication_fault)
+    {
+        return "Fault";
+    }
+    if (runtime->fd >= 0 && runtime->epoll_ready && can_netlink_is_up(bus->interface))
+    {
+        return "OK";
+    }
+    return "Offline";
+}
+
+static int canopen_append_stats_row(char *out, size_t out_size, size_t *position, int *row_count,
+                                    const char *key,
+                                    const char *role, const char *name, const char *node_id,
+                                    const char *status)
+{
+    if (out == NULL || position == NULL || row_count == NULL || *position >= out_size)
+    {
         return -1;
-    response[0] = '\0';
-
-    if (!command_json || !command_json[0])
-    {
-        snprintf(response, response_size, "{\"status\":\"empty_command\"}");
-        return 0;
     }
 
-    cJSON *root = cJSON_Parse(command_json);
-    if (root == NULL)
+    int written =
+        snprintf(out + *position, out_size - *position,
+                 "%s{\"key\":\"%s\",\"fields\":["
+                 "{\"label\":\"Role\",\"value\":\"%s\"},"
+                 "{\"label\":\"Name\",\"value\":\"%s\"},"
+                 "{\"label\":\"Node ID\",\"value\":\"%s\"},"
+                 "{\"label\":\"Status\",\"value\":\"%s\"}]}",
+                 *row_count > 0 ? "," : "", key, role, name, node_id, status);
+    if (written < 0 || (size_t)written >= out_size - *position)
     {
-        snprintf(response, response_size, "{\"status\":\"invalid_json\"}");
-        return 0;
+        return -1;
     }
 
-    const char *op =
-        cJSON_GetObjectItem(root, "op") ? cJSON_GetObjectItem(root, "op")->valuestring : NULL;
-    const char *bus_name =
-        cJSON_GetObjectItem(root, "bus") ? cJSON_GetObjectItem(root, "bus")->valuestring : NULL;
-    int bus_index = -1;
-    for (int i = 0; i < g_runtime_bus_count; i++)
+    *position += (size_t)written;
+    (*row_count)++;
+    return 0;
+}
+
+int get_stats(char *out, size_t out_size)
+{
+    if (out == NULL || out_size == 0U)
     {
-        if (bus_name == NULL || strcmp(g_config.buses[i].name, bus_name) == 0)
-        {
-            bus_index = i;
-            break;
-        }
+        return -1;
     }
 
-    if (bus_index < 0)
+    size_t position = 0U;
+    int bus_count   = 0;
+    int written     = snprintf(out, out_size, "{\"label\":\"CANopen\",\"interfaces\":{");
+    if (written < 0 || (size_t)written >= out_size)
     {
-        bus_index = 0;
+        return -1;
     }
+    position = (size_t)written;
 
-    if (op != NULL && strcmp(op, "sdo_read") == 0)
+    for (int i = 0; i < g_config.bus_count && i < MAX_CANOPEN_BUSES; i++)
     {
-        uint16_t index    = 0U;
-        uint8_t sub_index = 0U;
-        uint8_t node_id   = 0U;
-
-        cJSON *idx = cJSON_GetObjectItem(root, "index");
-        if (idx != NULL && idx->valuestring)
+        const canopen_bus_config_t *bus = &g_config.buses[i];
+        if (!bus->enabled)
         {
-            index = (uint16_t)strtoul(idx->valuestring, NULL, 0);
-        }
-        else if (idx != NULL && cJSON_IsNumber(idx))
-        {
-            index = (uint16_t)idx->valueint;
+            continue;
         }
 
-        cJSON *sub = cJSON_GetObjectItem(root, "sub_index");
-        if (sub != NULL)
+        const canopen_runtime_bus_t *runtime = &g_runtime_buses[i];
+        written = snprintf(out + position, out_size - position,
+                           "%s\"%s\":{\"label\":\"CANopen (%s)\",\"fields\":[],\"rows\":[",
+                           bus_count > 0 ? "," : "", bus->interface, bus->interface);
+        if (written < 0 || (size_t)written >= out_size - position)
         {
-            sub_index =
-                (uint8_t)(cJSON_IsNumber(sub) ? sub->valueint
-                                              : (uint8_t)strtoul(sub->valuestring, NULL, 0));
+            return -1;
+        }
+        position += (size_t)written;
+
+        char node_id[16];
+        int row_count = 0;
+        snprintf(node_id, sizeof(node_id), "-");
+        if (canopen_append_stats_row(out, out_size, &position, &row_count, "bus", "Bus", bus->name,
+                         node_id, canopen_bus_status(bus, runtime)) != 0)
+        {
+            return -1;
         }
 
-        cJSON *node = cJSON_GetObjectItem(root, "node_id");
-        if (node == NULL || (!cJSON_IsNumber(node) && !cJSON_IsString(node)))
+        for (int s = 0; s < bus->slave_count && s < MAX_CANOPEN_SLAVES; s++)
         {
-            snprintf(
-                response, response_size,
-                "{\"status\":\"sdo_read_failed\",\"reason\":\"missing_node_id\",\"bus\":\"%s\"}",
-                g_config.buses[bus_index].name);
-            cJSON_Delete(root);
-            return 0;
-        }
-        node_id = (uint8_t)(cJSON_IsNumber(node) ? node->valueint
-                                                 : (uint8_t)strtoul(node->valuestring, NULL, 0));
-
-        snprintf(
-            response, response_size,
-            "{\"status\":\"accepted\",\"op\":\"sdo_read\",\"bus\":\"%s\",\"node_id\":%u,"
-            "\"index\":%u,\"sub_index\":%u,\"note\":\"SDO is config-only in thin adapter mode\"}",
-            g_config.buses[bus_index].name, node_id, index, sub_index);
-        cJSON_Delete(root);
-        return 0;
-    }
-
-    if (op != NULL && strcmp(op, "sdo_write") == 0)
-    {
-        uint16_t index    = 0U;
-        uint8_t sub_index = 0U;
-        uint8_t node_id   = 0U;
-        uint8_t data[16];
-        size_t data_len = 0U;
-
-        cJSON *idx = cJSON_GetObjectItem(root, "index");
-        if (idx != NULL && idx->valuestring)
-        {
-            index = (uint16_t)strtoul(idx->valuestring, NULL, 0);
-        }
-        else if (idx != NULL && cJSON_IsNumber(idx))
-        {
-            index = (uint16_t)idx->valueint;
-        }
-
-        cJSON *sub = cJSON_GetObjectItem(root, "sub_index");
-        if (sub != NULL)
-        {
-            sub_index =
-                (uint8_t)(cJSON_IsNumber(sub) ? sub->valueint
-                                              : (uint8_t)strtoul(sub->valuestring, NULL, 0));
-        }
-
-        cJSON *node = cJSON_GetObjectItem(root, "node_id");
-        if (node == NULL || (!cJSON_IsNumber(node) && !cJSON_IsString(node)))
-        {
-            cJSON_Delete(root);
-            snprintf(
-                response, response_size,
-                "{\"status\":\"sdo_write_failed\",\"reason\":\"missing_node_id\",\"bus\":\"%s\"}",
-                g_config.buses[bus_index].name);
-            return 0;
-        }
-        node_id = (uint8_t)(cJSON_IsNumber(node) ? node->valueint
-                                                 : (uint8_t)strtoul(node->valuestring, NULL, 0));
-
-        cJSON *value = cJSON_GetObjectItem(root, "value");
-        if (value != NULL)
-        {
-            if (cJSON_IsNumber(value))
+            const canopen_slave_config_t *slave = &bus->slaves[s];
+            if (!slave->enabled)
             {
-                uint32_t v = (uint32_t)value->valueint;
-                memcpy(data, &v, sizeof(v));
-                data_len = sizeof(v);
+                continue;
+            }
+
+            snprintf(node_id, sizeof(node_id), "%u", slave->node_id);
+            const char *status = canopen_slave_status(slave, runtime)
+                                     ? "Operational"
+                                     : (runtime->communication_fault ? "Fault" : "Not Operational");
+            char key[64];
+            snprintf(key, sizeof(key), "slave-%d", s);
+            if (canopen_append_stats_row(out, out_size, &position, &row_count, key, "Slave", slave->name,
+                                         node_id, status) != 0)
+            {
+                break;
             }
         }
 
-        if (data_len == 0U)
+        written = snprintf(out + position, out_size - position, "]}");
+        if (written < 0 || (size_t)written >= out_size - position)
         {
-            cJSON_Delete(root);
-            snprintf(response, response_size,
-                     "{\"status\":\"sdo_write_failed\",\"reason\":\"missing_value\"}");
-            return 0;
+            break;
         }
-
-        cJSON_Delete(root);
-        snprintf(
-            response, response_size,
-            "{\"status\":\"accepted\",\"op\":\"sdo_write\",\"bus\":\"%s\",\"node_id\":%u,"
-            "\"index\":%u,\"sub_index\":%u,\"note\":\"SDO is config-only in thin adapter mode\"}",
-            g_config.buses[bus_index].name, node_id, index, sub_index);
-        return 0;
+        position += (size_t)written;
+        bus_count++;
     }
 
-    cJSON *status = cJSON_GetObjectItem(root, "status");
-    if (status != NULL && strcmp(status->valuestring, "poll") == 0)
+    written = snprintf(out + position, out_size - position, "}}");
+    if (written < 0 || (size_t)written >= out_size - position)
     {
-        snprintf(
-            response, response_size, "{\"status\":\"ok\",\"pending_sdo\":%d,\"active\":%s}",
-            g_runtime_bus_count > 0 ? (g_runtime_buses[bus_index].sdo_transaction.active ? 1 : 0)
-                                    : 0,
-            g_runtime_bus_count > 0 && g_runtime_buses[bus_index].sdo_transaction.active ? "true"
-                                                                                         : "false");
-        cJSON_Delete(root);
-        return 0;
+        return -1;
     }
-
-    cJSON_Delete(root);
-    snprintf(response, response_size, "{\"status\":\"accepted\",\"bus_count\":%d,\"command\":%s}",
-             g_runtime_bus_count, command_json);
     return 0;
 }
+
+int execute_command(const char *command_json, char *response, size_t response_size)
+{
+    (void)command_json;
+    if (response && response_size > 0)
+    {
+        snprintf(response, response_size, "{\"error\":\"CANopen command interface is not supported\"}"); 
+    }
+    return 0;
+}
+
+
