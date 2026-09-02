@@ -34,6 +34,14 @@ extern "C"
      */
     int can_netlink_down(const char *ifname, plugin_logger_t *logger);
 
+    /**
+     * @brief Check whether a CAN interface is administratively UP
+     *
+     * @param ifname Interface name (e.g. "can0")
+     * @return true when the interface exists and is UP, false otherwise
+     */
+    bool can_netlink_is_up(const char *ifname);
+
 #ifdef __cplusplus
 }
 #endif

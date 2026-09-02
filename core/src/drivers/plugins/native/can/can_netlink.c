@@ -142,6 +142,27 @@ int can_netlink_down(const char *ifname, plugin_logger_t *logger)
     return ret;
 }
 
+bool can_netlink_is_up(const char *ifname)
+{
+    if (ifname == NULL || ifname[0] == '\0')
+    {
+        return false;
+    }
+
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0)
+    {
+        return false;
+    }
+
+    struct ifreq request;
+    memset(&request, 0, sizeof(request));
+    snprintf(request.ifr_name, sizeof(request.ifr_name), "%s", ifname);
+    bool is_up = ioctl(fd, SIOCGIFFLAGS, &request) == 0 && (request.ifr_flags & IFF_UP) != 0;
+    close(fd);
+    return is_up;
+}
+
 int can_netlink_configure_and_up(const can_hardware_config_t *hw, plugin_logger_t *logger)
 {
     if (!hw || !hw->interface[0])
@@ -277,6 +298,12 @@ int can_netlink_configure_and_up(const can_hardware_config_t *hw, plugin_logger_
     (void)hw;
     (void)logger;
     return 0;
+}
+
+bool can_netlink_is_up(const char *ifname)
+{
+    (void)ifname;
+    return false;
 }
 
 #endif

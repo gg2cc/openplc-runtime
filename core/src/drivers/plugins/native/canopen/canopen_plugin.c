@@ -220,7 +220,7 @@ struct canopen_runtime_bus_s
 
 static int canopen_parse_iec_address(const char *address, char *prefix, size_t prefix_len,
                                      int *index, int *bit);
-static void canopen_send_configured_sdos(const canopen_bus_config_t *bus,
+static bool canopen_send_configured_sdos(const canopen_bus_config_t *bus,
                                          canopen_runtime_bus_t *runtime);
 static bool canopen_has_node_guarding_slaves(const canopen_bus_config_t *bus);
 static bool canopen_configure_node_guarding(const canopen_bus_config_t *bus, CO_t *co);
@@ -605,6 +605,14 @@ static void canopen_start_configured_slaves(const canopen_bus_config_t *bus, CO_
         return;
     }
 
+    if (!can_netlink_is_up(bus->interface))
+    {
+        runtime->communication_fault = true;
+        runtime->startup_confirmed = false;
+        runtime->reconnect_required = true;
+        return;
+    }
+
     uint32_t now_ms = canopen_now_ms();
     if (runtime != NULL && runtime->startup_confirmed && !runtime->reconnect_required)
     {
@@ -654,6 +662,12 @@ static void canopen_start_configured_slaves(const canopen_bus_config_t *bus, CO_
         }
 
         runtime->startup_reset_sent = true;
+        if (runtime->communication_fault)
+        {
+            runtime->startup_reset_sent = false;
+            runtime->last_start_ms = now_ms;
+            return;
+        }
         if (reset_sent)
         {
             usleep(50000U);
@@ -684,6 +698,9 @@ static void canopen_start_configured_slaves(const canopen_bus_config_t *bus, CO_
         else
         {
             runtime->communication_fault = true;
+            runtime->last_start_ms = now_ms;
+            runtime->startup_reset_sent = false;
+            return;
         }
     }
 
@@ -693,7 +710,12 @@ static void canopen_start_configured_slaves(const canopen_bus_config_t *bus, CO_
     /* Step 2: Configure SDOs while slave is in Pre-Operational state */
     if (!runtime->startup_sdo_sent)
     {
-        canopen_send_configured_sdos(bus, runtime);
+        if (!canopen_send_configured_sdos(bus, runtime))
+        {
+            runtime->startup_sdo_sent = false;
+            runtime->last_start_ms = now_ms;
+            return;
+        }
         runtime->startup_sdo_sent = true;
         plugin_logger_info(
             &g_logger, "Configured SDOs sent in Pre-Operational state: bus=%s recovery_count=%u",
@@ -1998,12 +2020,12 @@ static void canopen_add_pdo_mapping_sdos(const canopen_slave_config_t *slave,
     *entry_count = count;
 }
 
-static void canopen_send_configured_sdos(const canopen_bus_config_t *bus,
+static bool canopen_send_configured_sdos(const canopen_bus_config_t *bus,
                                          canopen_runtime_bus_t *runtime)
 {
     if (bus == NULL || runtime == NULL || runtime->co == NULL)
     {
-        return;
+        return false;
     }
 
     if (runtime->co->SDOclient == NULL)
@@ -2011,7 +2033,7 @@ static void canopen_send_configured_sdos(const canopen_bus_config_t *bus,
         plugin_logger_warn(&g_logger,
                            "SDO client unavailable on bus=%s; skipping configured SDO writes",
                            bus->name);
-        return;
+        return false;
     }
 
     /* Give slaves a small pause after entering Pre-Operational state before issuing SDO writes */
@@ -2082,10 +2104,12 @@ static void canopen_send_configured_sdos(const canopen_bus_config_t *bus,
 
         for (int i = 0; i < protection_sdo_count; i++)
         {
-            if (canopen_send_sdo_write(runtime, slave->node_id, &protection_sdos[i]))
+            if (!canopen_send_sdo_write(runtime, slave->node_id, &protection_sdos[i]))
             {
-                sent_count++;
+                runtime->communication_fault = true;
+                return false;
             }
+            sent_count++;
         }
 
         canopen_sdo_entry_t generated_sdos[(CANOPEN_LOCAL_RPDO_MAX + CANOPEN_LOCAL_TPDO_MAX) *
@@ -2095,10 +2119,12 @@ static void canopen_send_configured_sdos(const canopen_bus_config_t *bus,
         canopen_add_pdo_mapping_sdos(slave, generated_sdos, &generated_sdo_count);
         for (int i = 0; i < generated_sdo_count; i++)
         {
-            if (canopen_send_sdo_write(runtime, slave->node_id, &generated_sdos[i]))
+            if (!canopen_send_sdo_write(runtime, slave->node_id, &generated_sdos[i]))
             {
-                sent_count++;
+                runtime->communication_fault = true;
+                return false;
             }
+            sent_count++;
         }
 
         for (int i = 0; i < slave->sdo_count; i++)
@@ -2117,15 +2143,18 @@ static void canopen_send_configured_sdos(const canopen_bus_config_t *bus,
                 continue;
             }
 
-            if (canopen_send_sdo_write(runtime, slave->node_id, entry))
+            if (!canopen_send_sdo_write(runtime, slave->node_id, entry))
             {
-                sent_count++;
+                runtime->communication_fault = true;
+                return false;
             }
+            sent_count++;
         }
     }
 
     plugin_logger_info(&g_logger, "Configured SDO writes completed for bus=%s sent=%d", bus->name,
                        sent_count);
+    return true;
 }
 
 static int init_runtime_bus(const canopen_bus_config_t *bus, int bus_index)
