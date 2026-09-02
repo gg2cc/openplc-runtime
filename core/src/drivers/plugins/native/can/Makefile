@@ -24,3 +24,4 @@ clean:
 .PHONY: all clean
 
 # make -C core/src/drivers/plugins/native/can
+# ./core/src/deploy-to-3562.sh
