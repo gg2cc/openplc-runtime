@@ -6,16 +6,100 @@ It receives debug commands in hex format, forwards them to the Unix socket,
 and returns responses through the WebSocket connection.
 """
 
+from typing import Any
+
 from flask import request
-from flask_jwt_extended import verify_jwt_in_request
+from flask_jwt_extended import decode_token, verify_jwt_in_request
 from flask_socketio import SocketIO, emit
 
 from webserver.logger import get_logger
+
+# The debug socket is mounted on app_restapi and shares its JWT manager, so it
+# also shares the two decisions that outlive a token: the logout blacklist and
+# who the token's subject actually is. Importing the loaders rather than reaching
+# into `jwt_blacklist` keeps one definition of each. Safe direction: restapi does
+# not import this module.
+from webserver.restapi import check_if_token_revoked, user_lookup_callback
+from webserver.vpp_license_debug import handle_license_command
 
 logger, _ = get_logger("debug_ws", use_buffer=True)
 
 _socketio = None  # pylint: disable=invalid-name
 _unix_client = None  # pylint: disable=invalid-name
+
+# Token captured per connection, so every COMMAND can be re-checked against the
+# decisions that outlive it (see _reverify_session_token) rather than inheriting
+# the connect-time verdict forever. Keyed by socket id; dropped on disconnect.
+_session_tokens: dict = {}
+
+
+def _reverify_session_token() -> bool:
+    """Re-check this connection's token before serving a command.
+
+    WHAT THIS ENFORCES
+    ------------------
+    The connect handler authenticates once, in full. Two things can still change
+    afterwards, and both must land on an already-open socket:
+
+    * **Revocation.** ``/logout`` adds the token's ``jti`` to the blacklist, and
+      that blacklist is only ever consulted during verification. Without a
+      re-check, logging out left the session still answering the license FCs --
+      which read the hardware anchor and write the license blob, so this channel
+      is a trust boundary and "authenticated once, ever" is not enough.
+    * **Identity.** The account behind the token can be deleted while the socket
+      is open. A token whose subject no longer exists authorizes nobody.
+
+    WHAT THIS DELIBERATELY DOES NOT ENFORCE
+    ---------------------------------------
+    Token EXPIRY, which is not a revocation. A debug session is a long-lived
+    connection authenticated at the handshake -- the model every WebSocket
+    client assumes, and the one this endpoint had before v4.2.0. The
+    access-token lifetime (15 minutes, the flask-jwt-extended default, since no
+    config sets JWT_ACCESS_TOKEN_EXPIRES) bounds how long a bearer token may be
+    presented to obtain NEW access, and the connect handler still enforces it in
+    full: an expired token cannot open a socket, and cannot be installed by
+    ``reauth`` either.
+
+    Refusing COMMANDS on expiry bought nothing beyond that, because the holder
+    of an expired token on an open socket is the same party that was
+    authenticated on it minutes earlier, and it broke every client with no
+    renewal path. Editor v4.2.11 and older have none -- a debug session that
+    used to last as long as it stayed open began dying about 15 minutes in, with
+    the raw ``token_expired`` string surfaced to the user and no way back short
+    of reconnecting. The ``reauth`` handler below is still the supported renewal
+    path for clients that do implement it; it is now an optimisation rather than
+    the only thing keeping a session alive.
+    """
+    token = _session_tokens.get(request.sid)
+    if not token:
+        logger.warning("Debug command on a session with no captured token")
+        return False
+
+    try:
+        # allow_expired relaxes the `exp` claim and NOTHING else: the signature,
+        # the algorithm and the claim structure are all still verified, so a
+        # forged or tampered token raises here exactly as before.
+        payload: dict[str, Any] = decode_token(token, allow_expired=True)
+    except Exception as e:
+        logger.warning("Debug command rejected, token did not verify: %s", e)
+        return False
+
+    # Parity with verify_jwt_in_request, which refuses a refresh token where an
+    # access token is required. Only access tokens are ever issued here, so
+    # anything else is a client bug at best.
+    if payload.get("type") != "access":
+        logger.warning("Debug command rejected, token is not an access token")
+        return False
+
+    if check_if_token_revoked({}, payload):
+        logger.info("Debug command rejected: this session's token was revoked by logout")
+        return False
+
+    if user_lookup_callback({}, payload) is None:
+        logger.info("Debug command rejected: the account behind this session no longer exists")
+        return False
+
+    return True
 
 
 def init_debug_websocket(app, unix_client_instance):
@@ -83,6 +167,10 @@ def init_debug_websocket(app, unix_client_instance):
             request.environ["HTTP_AUTHORIZATION"] = f"Bearer {token}"
             verify_jwt_in_request()
 
+            # Kept so every command can re-check revocation and identity against
+            # it, instead of the session inheriting this one verdict for good.
+            _session_tokens[request.sid] = token
+
             logger.info("Debug WebSocket connected")
             emit("connected", {"status": "ok"})
             return True
@@ -91,9 +179,40 @@ def init_debug_websocket(app, unix_client_instance):
             logger.warning("Debug WebSocket auth failed: %s", e)
             return False
 
+    @_socketio.on("reauth", namespace="/api/debug")
+    def handle_reauth(data):
+        """Swap this session's token for a fresh one, after FULL verification.
+
+        Optional for the client. Since expiry alone no longer refuses a command
+        (see _reverify_session_token), a session survives without ever calling
+        this -- which is what keeps Editor v4.2.11 and older working. What it
+        still buys a client that does call it: the session stops depending on a
+        token that can no longer be renewed anywhere else, so a later logout
+        revokes the token the user is actually holding.
+
+        The new token goes through the FULL pipeline -- signature, expiry,
+        revocation, user lookup -- so reauth can never LOWER the bar, only
+        replace a live session's credential with an equally valid one.
+        """
+        token = data.get("token", "") if isinstance(data, dict) else ""
+        if not token:
+            emit("reauth_result", {"success": False, "error": "no token"})
+            return
+        try:
+            request.environ["HTTP_AUTHORIZATION"] = f"Bearer {token}"
+            verify_jwt_in_request()
+        except Exception as e:
+            logger.warning("reauth rejected: %s", e)
+            emit("reauth_result", {"success": False, "error": "Unauthorized"})
+            return
+        _session_tokens[request.sid] = token
+        logger.info("Debug session token renewed via reauth")
+        emit("reauth_result", {"success": True})
+
     @_socketio.on("disconnect", namespace="/api/debug")
     def handle_disconnect():
         """Handle WebSocket disconnection"""
+        _session_tokens.pop(request.sid, None)
         logger.info("Debug WebSocket disconnected")
 
     @_socketio.on("debug_command", namespace="/api/debug")
@@ -109,18 +228,50 @@ def init_debug_websocket(app, unix_client_instance):
         Returns debug response in same hex format
         """
         try:
+            command_hex = data.get("command", "")
+            if not command_hex:
+                logger.warning("Empty debug command received")
+                emit("debug_response", {"success": False, "error": "Empty command"})
+                return
+
+            # Re-check EVERY command, not just the connect. See
+            # _reverify_session_token: a revoked token, or one whose account is
+            # gone, must stop working on a socket that is already open. Plain
+            # expiry does not, which is why this is a re-CHECK and not a full
+            # re-authentication.
+            if not _reverify_session_token():
+                emit("debug_response", {"success": False, "error": "Unauthorized"})
+                return
+
+            # The license FCs are open to any AUTHENTICATED role, not just admin
+            # (decision 2026-08-25). They were admin-gated on the theory that the
+            # anchor read (0x48) and the blob write (0x49) were a trust boundary,
+            # but that gate protected the wrong thing: the PURCHASE is authorized
+            # by the Edge account on the /buy page, never by the runtime role, so
+            # requiring admin here only stopped an operator from activating a
+            # licence they had already paid for. What stays open is low-risk: the
+            # anchor is the board's serial (baremetal exposes it with no auth at
+            # all), the blob is node-locked and useless on another device, and a
+            # bad write is recoverable (the entitlement lives in the backend; a
+            # refresh rewrites the correct blob). JWT re-verification above still
+            # applies, so "any role" means any logged-in user, never anonymous.
+
+            # License function codes (0x48/0x49/0x4A) operate on host files
+            # (/proc anchor + conf/<plugin>.license) and are resolved here in
+            # Python (D70a) BEFORE the unix-socket gate below, so device
+            # activation works even while the PLC/core is stopped.
+            license_response = handle_license_command(command_hex)
+            if license_response is not None:
+                logger.debug("License FC handled locally: %s -> %s", command_hex, license_response)
+                emit("debug_response", {"success": True, "data": license_response})
+                return
+
             if not _unix_client or not _unix_client.is_connected():
                 logger.error("Unix socket not connected")
                 emit(
                     "debug_response",
                     {"success": False, "error": "Runtime not connected"},
                 )
-                return
-
-            command_hex = data.get("command", "")
-            if not command_hex:
-                logger.warning("Empty debug command received")
-                emit("debug_response", {"success": False, "error": "Empty command"})
                 return
 
             logger.debug("Debug command received: %s", command_hex)
