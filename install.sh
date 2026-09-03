@@ -581,9 +581,26 @@ chmod +x "$OPENPLC_DIR/install.sh" 2>/dev/null || true
 chmod +x "$OPENPLC_DIR/scripts/"* 2>/dev/null || true
 chmod +x "$OPENPLC_DIR/start_openplc.sh" 2>/dev/null || true
 
-# Use specified Python or fallback to system python3
-PYTHON_BIN="${PYTHON_BIN:-python3}"
-log_info "Using Python: $($PYTHON_BIN --version)"
+# Use the explicitly specified Python, the target's Python 3.10, or system python3.
+if [ -z "${PYTHON_BIN:-}" ]; then
+    if [ -x "/opt/python310/bin/python3.10" ]; then
+        PYTHON_BIN="/opt/python310/bin/python3.10"
+    else
+        PYTHON_BIN="python3"
+    fi
+fi
+
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1 && [ ! -x "$PYTHON_BIN" ]; then
+    log_error "Python interpreter not found: $PYTHON_BIN"
+    exit 1
+fi
+
+PYTHON_VERSION="$($PYTHON_BIN -c 'import sys; print(".".join(map(str, sys.version_info[:3])))')"
+if ! "$PYTHON_BIN" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 1)'; then
+    log_error "Python >= 3.10 is required, found $PYTHON_VERSION"
+    exit 1
+fi
+log_info "Using Python: $PYTHON_BIN ($PYTHON_VERSION)"
 
 if [ "${SKIP_DEPS:-0}" != "1" ]; then
     install_dependencies
@@ -591,7 +608,7 @@ else
     log_info "Skipping system dependencies installation as requested."
 fi
 
-$PYTHON_BIN -m venv "$VENV_DIR"
+"$PYTHON_BIN" -m venv "$VENV_DIR"
 "$VENV_DIR/bin/python3" -m pip install --upgrade pip setuptools wheel
 "$VENV_DIR/bin/python3" -m pip install -r "$OPENPLC_DIR/requirements.txt"
 "$VENV_DIR/bin/python3" -m pip install -e .

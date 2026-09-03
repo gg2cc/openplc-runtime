@@ -48,8 +48,8 @@ pip install -i https://pypi.tuna.tsinghua.edu.cn/simple cmake
 cd /opt/openplc-runtime
 
 # 1. 设置环境变量，指向 rootfs 中的 Python 3.10
-export PYTHON_BIN=/root-ro/opt/python310/bin/python3.10
-export PY310_PATH=/root-ro/opt/python310
+export PYTHON_BIN=/opt/python310/bin/python3.10
+export PY310_PATH=/opt/python310
 export CFLAGS="-I$PY310_PATH/include/python3.10"
 export LDFLAGS="-L$PY310_PATH/lib -lpython3.10"
 
