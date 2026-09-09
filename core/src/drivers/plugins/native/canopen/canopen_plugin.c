@@ -40,9 +40,7 @@
 #define CANOPEN_NMT_CONTROL                                                                        \
     (CO_NMT_STARTUP_TO_OPERATIONAL | CO_NMT_ERR_ON_ERR_REG | CO_ERR_REG_GENERIC_ERR |              \
      CO_ERR_REG_COMMUNICATION)
-#define CANOPEN_LOCAL_RPDO_MAX 4
 #define CANOPEN_LOCAL_RPDO_MAX_MAPPINGS 8
-#define CANOPEN_LOCAL_TPDO_MAX 4
 #define CANOPEN_LOCAL_TPDO_MAX_MAPPINGS 8
 
 static inline int canopen_min_int(int a, int b)
@@ -1005,7 +1003,7 @@ static void canopen_configure_local_rpdos(const canopen_bus_config_t *bus,
         for (int p = 0; p < slave->rpdo_count; p++)
         {
             const canopen_pdo_t *pdo = &slave->rpdo[p];
-            if (pdo->index < 0x1800U || pdo->index >= (0x1800U + CANOPEN_LOCAL_RPDO_MAX) ||
+            if (pdo->index < 0x1800U || pdo->index >= (0x1800U + CANOPEN_PDOS_PER_SLAVE) ||
                 pdo->mapping_count <= 0)
             {
                 continue;
@@ -1195,6 +1193,16 @@ static void canopen_configure_local_tpdos(const canopen_bus_config_t *bus,
         for (int p = 0; p < slave->tpdo_count; p++)
         {
             const canopen_pdo_t *pdo = &slave->tpdo[p];
+            if (pdo->index < 0x1400U || pdo->index >= (0x1400U + CANOPEN_PDOS_PER_SLAVE))
+            {
+                plugin_logger_warn(&g_logger,
+                                   "Skipping invalid remote TPDO index: bus=%s slave=%s "
+                                   "pdo=%s index=0x%04X expected=0x1400..0x%04X",
+                                   bus->name, slave->name, pdo->name, pdo->index,
+                                   0x1400U + CANOPEN_PDOS_PER_SLAVE - 1U);
+                continue;
+            }
+
             if (pdo->mapping_count <= 0)
             {
                 continue;
@@ -1861,7 +1869,7 @@ static bool canopen_send_sdo_write(canopen_runtime_bus_t *runtime, uint8_t node_
     pthread_mutex_unlock(&runtime->stack_mutex);
 
     plugin_logger_info(&g_logger,
-                       "SDO write sent once: bus local node=%u target_node=%u index=0x%04X sub=%u "
+                       "SDO write sent : local node=%u target_node=%u index=0x%04X sub=%u "
                        "len=%zu value=0x%08X",
                        co->NMT->nodeId, node_id, entry->index, entry->sub_index, payload_len,
                        entry->default_value);
@@ -1883,7 +1891,7 @@ static void canopen_add_pdo_mapping_sdos(const canopen_slave_config_t *slave,
     {
         const canopen_pdo_t *pdo = &slave->rpdo[p];
         if (pdo == NULL || pdo->index < 0x1800U ||
-            pdo->index >= (0x1800U + CANOPEN_LOCAL_RPDO_MAX) || pdo->mapping_count <= 0)
+            pdo->index >= (0x1800U + CANOPEN_PDOS_PER_SLAVE) || pdo->mapping_count <= 0)
         {
             continue;
         }
@@ -1966,7 +1974,7 @@ static void canopen_add_pdo_mapping_sdos(const canopen_slave_config_t *slave,
     {
         const canopen_pdo_t *pdo = &slave->tpdo[p];
         if (pdo == NULL || pdo->index < 0x1400U ||
-            pdo->index >= (0x1400U + CANOPEN_LOCAL_TPDO_MAX) || pdo->mapping_count <= 0)
+            pdo->index >= (0x1400U + CANOPEN_PDOS_PER_SLAVE) || pdo->mapping_count <= 0)
         {
             continue;
         }

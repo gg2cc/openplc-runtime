@@ -205,7 +205,7 @@ static void parse_sdo_entry(cJSON *item, canopen_sdo_entry_t *entry, plugin_logg
 }
 
 static void parse_pdo(cJSON *items, int *count, canopen_pdo_t *pdo_list, const char *pdo_name,
-                      plugin_logger_t *logger)
+                      int max_count, plugin_logger_t *logger)
 {
     if (!cJSON_IsArray(items))
     {
@@ -216,7 +216,15 @@ static void parse_pdo(cJSON *items, int *count, canopen_pdo_t *pdo_list, const c
     int total = cJSON_GetArraySize(items);
     *count    = 0;
 
-    for (int i = 0; i < total && i < MAX_CANOPEN_PDO_COUNT; i++)
+    if (logger && total > max_count)
+    {
+        plugin_logger_warn(logger,
+                           "CANopen %s PDO limit exceeded: configured=%d maximum=%d; "
+                           "ignoring entries beyond the limit",
+                           pdo_name, total, max_count);
+    }
+
+    for (int i = 0; i < total && i < max_count && i < MAX_CANOPEN_PDO_COUNT; i++)
     {
         cJSON *item = cJSON_GetArrayItem(items, i);
         if (!item)
@@ -349,10 +357,10 @@ static void parse_slave(cJSON *item, canopen_slave_config_t *slave, plugin_logge
     }
 
     cJSON *tpdo = cJSON_GetObjectItem(item, "tpdo");
-    parse_pdo(tpdo, &slave->tpdo_count, slave->tpdo, "tpdo", logger);
+    parse_pdo(tpdo, &slave->tpdo_count, slave->tpdo, "tpdo", CANOPEN_PDOS_PER_SLAVE, logger);
 
     cJSON *rpdo = cJSON_GetObjectItem(item, "rpdo");
-    parse_pdo(rpdo, &slave->rpdo_count, slave->rpdo, "rpdo", logger);
+    parse_pdo(rpdo, &slave->rpdo_count, slave->rpdo, "rpdo", CANOPEN_PDOS_PER_SLAVE, logger);
 
     cJSON *sdo = cJSON_GetObjectItem(item, "sdo");
     if (cJSON_IsArray(sdo))
@@ -532,10 +540,10 @@ static void parse_bus(cJSON *item, canopen_bus_config_t *bus, plugin_logger_t *l
     }
 
     cJSON *tpdo = cJSON_GetObjectItem(item, "tpdo");
-    parse_pdo(tpdo, &bus->tpdo_count, bus->tpdo, "tpdo", logger);
+    parse_pdo(tpdo, &bus->tpdo_count, bus->tpdo, "tpdo", CANOPEN_PDOS_PER_SLAVE, logger);
 
     cJSON *rpdo = cJSON_GetObjectItem(item, "rpdo");
-    parse_pdo(rpdo, &bus->rpdo_count, bus->rpdo, "rpdo", logger);
+    parse_pdo(rpdo, &bus->rpdo_count, bus->rpdo, "rpdo", CANOPEN_PDOS_PER_SLAVE, logger);
 
     cJSON *sdo = cJSON_GetObjectItem(item, "sdo");
     if (cJSON_IsArray(sdo))
@@ -555,6 +563,14 @@ static void parse_bus(cJSON *item, canopen_bus_config_t *bus, plugin_logger_t *l
     if (cJSON_IsArray(slaves))
     {
         int total = cJSON_GetArraySize(slaves);
+        if (logger && total > MAX_CANOPEN_SLAVES)
+        {
+            plugin_logger_warn(logger,
+                               "CANopen slave limit exceeded: bus=%s configured=%d maximum=%d; "
+                               "ignoring entries beyond the limit",
+                               bus->name[0] != '\0' ? bus->name : bus->interface, total,
+                               MAX_CANOPEN_SLAVES);
+        }
         for (int i = 0; i < total && i < MAX_CANOPEN_SLAVES; i++)
         {
             cJSON *slave_item = cJSON_GetArrayItem(slaves, i);
