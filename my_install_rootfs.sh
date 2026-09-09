@@ -56,6 +56,10 @@ export LDFLAGS="-L$PY310_PATH/lib -lpython3.10"
 # 2. 升级基础工具包 (可选,建议升级)：
 "$PYTHON_BIN" -m pip install --upgrade pip setuptools wheel
 
+# 2.1 git config 设置 (第一次安装,需要设置)
+git config --global --add safe.directory /****/openplc-runtime/core/src/drivers/plugins/native/ethercat/libs/soem
+git config --global --add safe.directory /****/openplc-runtime
+
 # 3. 执行脚本一键完成 C 核心编译与 Python 虚拟环境配置
 ./install.sh
 ```

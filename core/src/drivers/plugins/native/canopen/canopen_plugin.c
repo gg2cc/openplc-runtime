@@ -213,6 +213,7 @@ struct canopen_runtime_bus_s
     canopen_input_binding_t input_bindings[CANOPEN_LOCAL_RPDO_MAX][CANOPEN_LOCAL_RPDO_MAX_MAPPINGS];
     uint8_t input_binding_count[CANOPEN_LOCAL_RPDO_MAX];
     uint8_t input_rpdo_node_id[CANOPEN_LOCAL_RPDO_MAX];
+    uint32_t input_rpdo_cob_id[CANOPEN_LOCAL_RPDO_MAX];
     canopen_rpdo_callback_context_t rpdo_callback_context[CANOPEN_LOCAL_RPDO_MAX];
     canopen_output_tpdo_t output_tpdos[CANOPEN_LOCAL_TPDO_MAX];
     uint8_t output_tpdo_count;
@@ -989,6 +990,9 @@ static void canopen_configure_local_rpdos(const canopen_bus_config_t *bus,
     memset(runtime->input_bindings, 0, sizeof(runtime->input_bindings));
     memset(runtime->input_binding_count, 0, sizeof(runtime->input_binding_count));
     memset(runtime->input_rpdo_node_id, 0, sizeof(runtime->input_rpdo_node_id));
+    memset(runtime->input_rpdo_cob_id, 0, sizeof(runtime->input_rpdo_cob_id));
+
+    uint8_t local_slot_count = 0U;
 
     for (int s = 0; s < bus->slave_count; s++)
     {
@@ -1007,18 +1011,22 @@ static void canopen_configure_local_rpdos(const canopen_bus_config_t *bus,
                 continue;
             }
 
-            uint8_t slot = (uint8_t)(pdo->index - 0x1800U);
-            if (runtime->input_binding_count[slot] != 0U)
+            if (local_slot_count >= CANOPEN_LOCAL_RPDO_MAX)
             {
                 plugin_logger_warn(&g_logger,
-                                   "CANopen local RPDO slot collision: slot=%u old_node=%u "
-                                   "new_node=%u; replacing binding",
-                                   slot, runtime->input_rpdo_node_id[slot], slave->node_id);
+                                   "CANopen local RPDO capacity exceeded: bus=%s slave=%s "
+                                   "pdo=%s; maximum=%u",
+                                   bus->name, slave->name, pdo->name, CANOPEN_LOCAL_RPDO_MAX);
+                continue;
             }
 
+            uint8_t source_slot                = (uint8_t)(pdo->index - 0x1800U);
+            uint8_t slot                       = local_slot_count++;
             runtime->input_binding_count[slot] = 0U;
             runtime->input_rpdo_node_id[slot]  = (uint8_t)slave->node_id;
-            uint16_t bit_offset                = 0U;
+            runtime->input_rpdo_cob_id[slot] =
+                (uint32_t)(0x180U + ((uint32_t)source_slot * 0x100U) + slave->node_id);
+            uint16_t bit_offset = 0U;
             uint8_t map_count =
                 (uint8_t)canopen_min_int(pdo->mapping_count, CANOPEN_LOCAL_RPDO_MAX_MAPPINGS);
             for (uint8_t m = 0U; m < map_count; m++)
@@ -1051,7 +1059,7 @@ static void canopen_configure_local_rpdos(const canopen_bus_config_t *bus,
             }
 
             (void)OD_set_u8(OD_find(OD, (uint16_t)(0x1600U + slot)), 0U, map_count, true);
-            uint32_t cob_id = (uint32_t)(0x180U + ((uint32_t)slot * 0x100U) + slave->node_id);
+            uint32_t cob_id = runtime->input_rpdo_cob_id[slot];
             (void)OD_set_u32(OD_find(OD, (uint16_t)(0x1400U + slot)), 1U, cob_id, true);
             (void)OD_set_u8(OD_find(OD, (uint16_t)(0x1400U + slot)), 2U, 0xFEU, true);
             (void)OD_set_u16(OD_find(OD, (uint16_t)(0x1400U + slot)), 5U, 0U, true);
@@ -1187,8 +1195,18 @@ static void canopen_configure_local_tpdos(const canopen_bus_config_t *bus,
         for (int p = 0; p < slave->tpdo_count; p++)
         {
             const canopen_pdo_t *pdo = &slave->tpdo[p];
-            if (pdo->mapping_count <= 0 || runtime->output_tpdo_count >= CANOPEN_LOCAL_TPDO_MAX)
+            if (pdo->mapping_count <= 0)
             {
+                continue;
+            }
+
+            if (runtime->output_tpdo_count >= CANOPEN_LOCAL_TPDO_MAX)
+            {
+                plugin_logger_warn(&g_logger,
+                                   "CANopen local TPDO capacity exceeded: bus=%s slave=%s "
+                                   "pdo=%s index=0x%04X used=%u maximum=%u; skipping",
+                                   bus->name, slave->name, pdo->name, pdo->index,
+                                   runtime->output_tpdo_count, CANOPEN_LOCAL_TPDO_MAX);
                 continue;
             }
 
@@ -2374,8 +2392,7 @@ static int init_runtime_bus(const canopen_bus_config_t *bus, int bus_index)
                            "CANopen local RPDO input callback bound: bus=%s slot=%u cob_id=0x%03X "
                            "node_id=%u mappings=%u",
                            bus->name, slot,
-                           (unsigned)(0x180U + ((uint32_t)slot * 0x100U) +
-                                      g_runtime_buses[bus_index].input_rpdo_node_id[slot]),
+                           (unsigned)g_runtime_buses[bus_index].input_rpdo_cob_id[slot],
                            g_runtime_buses[bus_index].input_rpdo_node_id[slot],
                            g_runtime_buses[bus_index].input_binding_count[slot]);
     }
@@ -2596,23 +2613,21 @@ static const char *canopen_bus_status(const canopen_bus_config_t *bus,
 }
 
 static int canopen_append_stats_row(char *out, size_t out_size, size_t *position, int *row_count,
-                                    const char *key,
-                                    const char *role, const char *name, const char *node_id,
-                                    const char *status)
+                                    const char *key, const char *role, const char *name,
+                                    const char *node_id, const char *status)
 {
     if (out == NULL || position == NULL || row_count == NULL || *position >= out_size)
     {
         return -1;
     }
 
-    int written =
-        snprintf(out + *position, out_size - *position,
-                 "%s{\"key\":\"%s\",\"fields\":["
-                 "{\"label\":\"Role\",\"value\":\"%s\"},"
-                 "{\"label\":\"Name\",\"value\":\"%s\"},"
-                 "{\"label\":\"Node ID\",\"value\":\"%s\"},"
-                 "{\"label\":\"Status\",\"value\":\"%s\"}]}",
-                 *row_count > 0 ? "," : "", key, role, name, node_id, status);
+    int written = snprintf(out + *position, out_size - *position,
+                           "%s{\"key\":\"%s\",\"fields\":["
+                           "{\"label\":\"Role\",\"value\":\"%s\"},"
+                           "{\"label\":\"Name\",\"value\":\"%s\"},"
+                           "{\"label\":\"Node ID\",\"value\":\"%s\"},"
+                           "{\"label\":\"Status\",\"value\":\"%s\"}]}",
+                           *row_count > 0 ? "," : "", key, role, name, node_id, status);
     if (written < 0 || (size_t)written >= out_size - *position)
     {
         return -1;
@@ -2661,7 +2676,7 @@ int get_stats(char *out, size_t out_size)
         int row_count = 0;
         snprintf(node_id, sizeof(node_id), "-");
         if (canopen_append_stats_row(out, out_size, &position, &row_count, "bus", "Bus", bus->name,
-                         node_id, canopen_bus_status(bus, runtime)) != 0)
+                                     node_id, canopen_bus_status(bus, runtime)) != 0)
         {
             return -1;
         }
@@ -2680,8 +2695,8 @@ int get_stats(char *out, size_t out_size)
                                      : (runtime->communication_fault ? "Fault" : "Not Operational");
             char key[64];
             snprintf(key, sizeof(key), "slave-%d", s);
-            if (canopen_append_stats_row(out, out_size, &position, &row_count, key, "Slave", slave->name,
-                                         node_id, status) != 0)
+            if (canopen_append_stats_row(out, out_size, &position, &row_count, key, "Slave",
+                                         slave->name, node_id, status) != 0)
             {
                 break;
             }
@@ -2709,9 +2724,8 @@ int execute_command(const char *command_json, char *response, size_t response_si
     (void)command_json;
     if (response && response_size > 0)
     {
-        snprintf(response, response_size, "{\"error\":\"CANopen command interface is not supported\"}"); 
+        snprintf(response, response_size,
+                 "{\"error\":\"CANopen command interface is not supported\"}");
     }
     return 0;
 }
-
-
