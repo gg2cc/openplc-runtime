@@ -210,10 +210,11 @@ def init_debug_websocket(app, unix_client_instance):
         emit("reauth_result", {"success": True})
 
     @_socketio.on("disconnect", namespace="/api/debug")
-    def handle_disconnect():
-        """Handle WebSocket disconnection"""
+    def handle_disconnect(reason=None):
+        """Handle WebSocket disconnection and retain the Engine.IO reason."""
         _session_tokens.pop(request.sid, None)
-        logger.info("Debug WebSocket disconnected")
+        logger.info("Debug WebSocket disconnected sid=%s reason=%s",
+                    request.sid, reason or "unknown")
 
     @_socketio.on("debug_command", namespace="/api/debug")
     def handle_debug_command(data):
