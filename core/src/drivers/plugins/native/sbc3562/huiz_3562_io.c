@@ -33,6 +33,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <pthread.h>
+#include <time.h>
 
 #include "../plugin_logger.h"
 #include "../../../../lib/iec_types.h"
@@ -40,6 +41,7 @@
 
 #define NUM_INPUTS   16
 #define NUM_OUTPUTS  16
+#define IO_THREAD_PERIOD_NS 5000000L
 
 typedef struct {
     int pin;
@@ -102,7 +104,11 @@ static int g_led2_fd = -1;
 static plugin_logger_t g_logger;
 static plugin_runtime_args_t g_args;
 static int plugin_initialized = 0;
-static int plugin_running     = 0;
+static volatile int g_io_thread_stop = 0;
+static int g_io_thread_started = 0;
+static pthread_t g_io_thread;
+
+static void *io_thread_main(void *unused);
 
 /* Export a GPIO pin through sysfs */
 static int gpio_export(int pin)
@@ -282,30 +288,38 @@ int start_loop(void)
         plugin_logger_error(&g_logger, "start_loop: plugin not initialized");
         return -1;
     }
-    plugin_running = 1;
+
+    if (g_io_thread_started) {
+        return 0;
+    }
+
+    g_io_thread_stop = 0;
+
+    int rc = pthread_create(&g_io_thread, NULL, io_thread_main, NULL);
+    if (rc != 0) {
+        g_io_thread_stop = 1;
+        plugin_logger_error(&g_logger, "start_loop: failed to create I/O thread: %s", strerror(rc));
+        return -1;
+    }
+
+    g_io_thread_started = 1;
     plugin_logger_info(&g_logger, "HUIZ_AMR_IO GPIO plugin loop started");
     return 0;
 }
 
 void stop_loop(void)
 {
-    plugin_running = 0;
+    if (g_io_thread_started) {
+        g_io_thread_stop = 1;
+        pthread_join(g_io_thread, NULL);
+        g_io_thread_started = 0;
+    }
+
     plugin_logger_info(&g_logger, "HUIZ_AMR_IO GPIO plugin loop stopped");
 }
 
-/**
- * cycle_start: Read physical inputs and write to OpenPLC bool_input buffers.
- *
- * Called at the beginning of each PLC scan cycle.
- * Uses journal_write_bool so that writes are race-condition-free.
- *   journal_write_bool(type=0 => BOOL_INPUT, byte_index, bit_index, value)
- */
-void cycle_start(void)
+static void read_inputs(void)
 {
-    if (!plugin_initialized || !plugin_running) {
-        return;
-    }
-
     int i;
     for (i = 0; i < NUM_INPUTS; i++) {
         if (g_inputs[i].fd < 0) {
@@ -315,7 +329,7 @@ void cycle_start(void)
         char raw_val = '0';
         lseek(g_inputs[i].fd, 0, SEEK_SET);
         if (read(g_inputs[i].fd, &raw_val, 1) < 0) {
-            plugin_logger_warn(&g_logger, "cycle_start: read failed for input %d (pin %d): %s",
+            plugin_logger_warn(&g_logger, "I/O thread: read failed for input %d (pin %d): %s",
                                i, g_inputs[i].pin, strerror(errno));
             continue;
         }
@@ -327,23 +341,21 @@ void cycle_start(void)
     }
 }
 
-/**
- * cycle_end: Read OpenPLC bool_output buffers and drive physical outputs.
- *
- * Called at the end of each PLC scan cycle.
- */
-void cycle_end(void)
+static void write_outputs(void)
 {
-    if (!plugin_initialized || !plugin_running) {
+    int output_values[NUM_OUTPUTS] = {0};
+    int buzzer_value = 0;
+    int led1_value = 0;
+    int led2_value = 0;
+
+    if (g_args.image_lock == NULL || g_args.image_unlock == NULL) {
         return;
     }
 
     int i;
-    for (i = 0; i < NUM_OUTPUTS; i++) {
-        if (g_outputs[i].fd < 0) {
-            continue;
-        }
 
+    g_args.image_lock();
+    for (i = 0; i < NUM_OUTPUTS; i++) {
         int b_idx = g_outputs[i].byte_idx;
         int bit_idx = g_outputs[i].bit_idx;
 
@@ -351,63 +363,98 @@ void cycle_end(void)
             continue;
         }
 
-        int logic_val = (*g_args.bool_output[b_idx][bit_idx] != 0) ? 1 : 0;
-        int phys_val = g_outputs[i].active_low ? !logic_val : logic_val;
+        output_values[i] = (*g_args.bool_output[b_idx][bit_idx] != 0) ? 1 : 0;
+    }
+
+    if (g_args.bool_output != NULL &&
+        g_args.bool_output[g_buzzer.byte_idx] != NULL &&
+        g_args.bool_output[g_buzzer.byte_idx][g_buzzer.bit_idx] != NULL) {
+        buzzer_value = (*g_args.bool_output[g_buzzer.byte_idx][g_buzzer.bit_idx] != 0) ? 1 : 0;
+    }
+
+    if (g_args.bool_output != NULL && g_args.bool_output[3] != NULL) {
+        if (g_args.bool_output[3][0] != NULL) {
+            led1_value = (*g_args.bool_output[3][0] != 0) ? 1 : 0;
+        }
+        if (g_args.bool_output[3][1] != NULL) {
+            led2_value = (*g_args.bool_output[3][1] != 0) ? 1 : 0;
+        }
+    }
+    g_args.image_unlock();
+
+    for (i = 0; i < NUM_OUTPUTS; i++) {
+        if (g_outputs[i].fd < 0) {
+            continue;
+        }
+
+        int phys_val = g_outputs[i].active_low ? !output_values[i] : output_values[i];
         char out_char = phys_val ? '1' : '0';
 
         lseek(g_outputs[i].fd, 0, SEEK_SET);
         if (write(g_outputs[i].fd, &out_char, 1) < 0) {
-            plugin_logger_warn(&g_logger, "cycle_end: write failed for output %d (pin %d): %s",
+            plugin_logger_warn(&g_logger, "I/O thread: write failed for output %d (pin %d): %s",
                                i, g_outputs[i].pin, strerror(errno));
         }
     }
 
     /* Drive Buzzer pin (%QX2.0) */
-    if (g_buzzer.fd >= 0 &&
-        g_args.bool_output != NULL &&
-        g_args.bool_output[g_buzzer.byte_idx] != NULL &&
-        g_args.bool_output[g_buzzer.byte_idx][g_buzzer.bit_idx] != NULL) {
-
-        int logic_val = (*g_args.bool_output[g_buzzer.byte_idx][g_buzzer.bit_idx] != 0) ? 1 : 0;
-        int phys_val = g_buzzer.active_low ? !logic_val : logic_val;
+    if (g_buzzer.fd >= 0) {
+        int phys_val = g_buzzer.active_low ? !buzzer_value : buzzer_value;
         char out_char = phys_val ? '1' : '0';
 
         lseek(g_buzzer.fd, 0, SEEK_SET);
         if (write(g_buzzer.fd, &out_char, 1) < 0) {
-            plugin_logger_warn(&g_logger, "cycle_end: write failed for buzzer (pin %d): %s",
+            plugin_logger_warn(&g_logger, "I/O thread: write failed for buzzer (pin %d): %s",
                                g_buzzer.pin, strerror(errno));
         }
     }
 
     /* Drive LED1: %QX3.0 -> bool_output[3][0] */
-    if (g_led1_fd >= 0 &&
-        g_args.bool_output != NULL &&
-        g_args.bool_output[3] != NULL &&
-        g_args.bool_output[3][0] != NULL) {
-        char val = (*g_args.bool_output[3][0] != 0) ? '1' : '0';
+    if (g_led1_fd >= 0) {
+        char val = led1_value ? '1' : '0';
         lseek(g_led1_fd, 0, SEEK_SET);
         if (write(g_led1_fd, &val, 1) < 0) {
-            plugin_logger_warn(&g_logger, "cycle_end: write failed for LED1: %s", strerror(errno));
+            plugin_logger_warn(&g_logger, "I/O thread: write failed for LED1: %s", strerror(errno));
         }
     }
 
     /* Drive LED2: %QX3.1 -> bool_output[3][1] */
-    if (g_led2_fd >= 0 &&
-        g_args.bool_output != NULL &&
-        g_args.bool_output[3] != NULL &&
-        g_args.bool_output[3][1] != NULL) {
-        char val = (*g_args.bool_output[3][1] != 0) ? '1' : '0';
+    if (g_led2_fd >= 0) {
+        char val = led2_value ? '1' : '0';
         lseek(g_led2_fd, 0, SEEK_SET);
         if (write(g_led2_fd, &val, 1) < 0) {
-            plugin_logger_warn(&g_logger, "cycle_end: write failed for LED2: %s", strerror(errno));
+            plugin_logger_warn(&g_logger, "I/O thread: write failed for LED2: %s", strerror(errno));
         }
     }
+}
+
+static void *io_thread_main(void *unused)
+{
+    (void)unused;
+
+    while (!g_io_thread_stop) {
+        read_inputs();
+        write_outputs();
+
+        struct timespec delay = {
+            .tv_sec = 0,
+            .tv_nsec = IO_THREAD_PERIOD_NS
+        };
+        int rc = nanosleep(&delay, NULL);
+        if (rc != 0 && rc != EINTR) {
+            plugin_logger_warn(&g_logger, "I/O thread sleep failed: %s", strerror(rc));
+        }
+    }
+
+    return NULL;
 }
 
 /* cleanup: Release all GPIO resources */
 void cleanup(void)
 {
     plugin_logger_info(&g_logger, "Cleaning up HUIZ_AMR_IO GPIO plugin...");
+
+    stop_loop();
 
     int i;
     for (i = 0; i < NUM_OUTPUTS; i++) {
@@ -453,6 +500,5 @@ void cleanup(void)
     }
 
     plugin_initialized = 0;
-    plugin_running     = 0;
     plugin_logger_info(&g_logger, "HUIZ_AMR_IO GPIO plugin cleanup done");
 }
