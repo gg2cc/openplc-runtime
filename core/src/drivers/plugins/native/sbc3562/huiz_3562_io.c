@@ -41,7 +41,7 @@
 
 #define NUM_INPUTS   16
 #define NUM_OUTPUTS  16
-#define IO_THREAD_PERIOD_NS 5000000L
+#define IO_THREAD_PERIOD_NS 10000000L
 
 typedef struct {
     int pin;
