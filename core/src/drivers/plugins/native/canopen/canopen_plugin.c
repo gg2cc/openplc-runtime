@@ -210,8 +210,6 @@ struct canopen_runtime_bus_s
     canopen_sdo_transaction_t sdo_transaction;
     canopen_input_binding_t input_bindings[CANOPEN_LOCAL_RPDO_MAX][CANOPEN_LOCAL_RPDO_MAX_MAPPINGS];
     uint8_t input_binding_count[CANOPEN_LOCAL_RPDO_MAX];
-    uint8_t input_rpdo_node_id[CANOPEN_LOCAL_RPDO_MAX];
-    uint32_t input_rpdo_cob_id[CANOPEN_LOCAL_RPDO_MAX];
     canopen_rpdo_callback_context_t rpdo_callback_context[CANOPEN_LOCAL_RPDO_MAX];
     canopen_output_tpdo_t output_tpdos[CANOPEN_LOCAL_TPDO_MAX];
     uint8_t output_tpdo_count;
@@ -977,6 +975,82 @@ static void canopen_rpdo_signal_pre(void *object)
     }
 }
 
+static OD_RPDOCommunicationParameter_t *canopen_local_rpdo_comm(uint8_t slot)
+{
+    if (slot < 4U)
+    {
+        switch (slot)
+        {
+        case 0U:
+            return &OD_PERSIST_COMM.x1400_RPDOCommunicationParameter;
+        case 1U:
+            return &OD_PERSIST_COMM.x1401_RPDOCommunicationParameter;
+        case 2U:
+            return &OD_PERSIST_COMM.x1402_RPDOCommunicationParameter;
+        default:
+            return &OD_PERSIST_COMM.x1403_RPDOCommunicationParameter;
+        }
+    }
+    if (slot < OD_CNT_RPDO)
+    {
+        return &OD_PERSIST_COMM.x1404_RPDOCommunicationParameter[slot - 4U];
+    }
+    return NULL;
+}
+
+static OD_RPDOMappingParameter_t *canopen_local_rpdo_mapping(uint8_t slot)
+{
+    if (slot < 4U)
+    {
+        switch (slot)
+        {
+        case 0U:
+            return &OD_PERSIST_COMM.x1600_RPDOMappingParameter;
+        case 1U:
+            return &OD_PERSIST_COMM.x1601_RPDOMappingParameter;
+        case 2U:
+            return &OD_PERSIST_COMM.x1602_RPDOMappingParameter;
+        default:
+            return &OD_PERSIST_COMM.x1603_RPDOMappingParameter;
+        }
+    }
+    if (slot < OD_CNT_RPDO)
+    {
+        return &OD_PERSIST_COMM.x1604_RPDOMappingParameter[slot - 4U];
+    }
+    return NULL;
+}
+
+static uint32_t *canopen_local_rpdo_mapping_entry(OD_RPDOMappingParameter_t *mapping,
+                                                   uint8_t sub_index)
+{
+    if (mapping == NULL)
+    {
+        return NULL;
+    }
+    switch (sub_index)
+    {
+    case 1U:
+        return &mapping->applicationObject1;
+    case 2U:
+        return &mapping->applicationObject2;
+    case 3U:
+        return &mapping->applicationObject3;
+    case 4U:
+        return &mapping->applicationObject4;
+    case 5U:
+        return &mapping->applicationObject5;
+    case 6U:
+        return &mapping->applicationObject6;
+    case 7U:
+        return &mapping->applicationObject7;
+    case 8U:
+        return &mapping->applicationObject8;
+    default:
+        return NULL;
+    }
+}
+
 static void canopen_configure_local_rpdos(const canopen_bus_config_t *bus,
                                           canopen_runtime_bus_t *runtime)
 {
@@ -987,8 +1061,6 @@ static void canopen_configure_local_rpdos(const canopen_bus_config_t *bus,
 
     memset(runtime->input_bindings, 0, sizeof(runtime->input_bindings));
     memset(runtime->input_binding_count, 0, sizeof(runtime->input_binding_count));
-    memset(runtime->input_rpdo_node_id, 0, sizeof(runtime->input_rpdo_node_id));
-    memset(runtime->input_rpdo_cob_id, 0, sizeof(runtime->input_rpdo_cob_id));
 
     uint8_t local_slot_count = 0U;
 
@@ -1021,12 +1093,19 @@ static void canopen_configure_local_rpdos(const canopen_bus_config_t *bus,
             uint8_t source_slot                = (uint8_t)(pdo->index - 0x1800U);
             uint8_t slot                       = local_slot_count++;
             runtime->input_binding_count[slot] = 0U;
-            runtime->input_rpdo_node_id[slot]  = (uint8_t)slave->node_id;
-            runtime->input_rpdo_cob_id[slot] =
-                (uint32_t)(0x180U + ((uint32_t)source_slot * 0x100U) + slave->node_id);
             uint16_t bit_offset = 0U;
             uint8_t map_count =
                 (uint8_t)canopen_min_int(pdo->mapping_count, CANOPEN_LOCAL_RPDO_MAX_MAPPINGS);
+            OD_RPDOMappingParameter_t *local_mapping = canopen_local_rpdo_mapping(slot);
+            OD_RPDOCommunicationParameter_t *local_comm = canopen_local_rpdo_comm(slot);
+            if (local_mapping == NULL || local_comm == NULL)
+            {
+                plugin_logger_warn(&g_logger,
+                                   "CANopen local RPDO static OD slot unavailable: bus=%s "
+                                   "slave=%s slot=%u",
+                                   bus->name, slave->name, slot);
+                continue;
+            }
             for (uint8_t m = 0U; m < map_count; m++)
             {
                 const canopen_pdo_mapping_t *mapping = &pdo->mapping[m];
@@ -1043,8 +1122,12 @@ static void canopen_configure_local_rpdos(const canopen_bus_config_t *bus,
                 }
 
                 uint32_t local_map = (uint32_t)mapping->bit_length;
-                (void)OD_set_u32(OD_find(OD, (uint16_t)(0x1600U + slot)), (uint8_t)(m + 1U),
-                                 local_map, true);
+                uint32_t *local_mapping_entry =
+                    canopen_local_rpdo_mapping_entry(local_mapping, (uint8_t)(m + 1U));
+                if (local_mapping_entry != NULL)
+                {
+                    *local_mapping_entry = local_map;
+                }
 
                 canopen_input_binding_t *binding =
                     &runtime->input_bindings[slot][runtime->input_binding_count[slot]];
@@ -1056,17 +1139,13 @@ static void canopen_configure_local_rpdos(const canopen_bus_config_t *bus,
                 bit_offset = (uint16_t)(bit_offset + mapping->bit_length);
             }
 
-            (void)OD_set_u8(OD_find(OD, (uint16_t)(0x1600U + slot)), 0U, map_count, true);
-            uint32_t cob_id = runtime->input_rpdo_cob_id[slot];
-            (void)OD_set_u32(OD_find(OD, (uint16_t)(0x1400U + slot)), 1U, cob_id, true);
-            (void)OD_set_u8(OD_find(OD, (uint16_t)(0x1400U + slot)), 2U, 0xFEU, true);
-            (void)OD_set_u16(OD_find(OD, (uint16_t)(0x1400U + slot)), 5U, 0U, true);
+            uint32_t cob_id =
+                (uint32_t)(0x180U + ((uint32_t)source_slot * 0x100U) + slave->node_id);
+            local_mapping->numberOfMappedApplicationObjectsInPDO = map_count;
+            local_comm->COB_IDUsedByRPDO                              = cob_id;
+            local_comm->transmissionType                              = 0xFEU;
+            local_comm->eventTimer                                    = 0U;
 
-            plugin_logger_info(&g_logger,
-                               "CANopen local RPDO configured: bus=%s slave=%s slot=%u "
-                               "source_tpdo=0x%04X cob_id=0x%03X mappings=%u inputs=%u",
-                               bus->name, slave->name, slot, pdo->index, (unsigned)cob_id,
-                               map_count, runtime->input_binding_count[slot]);
         }
     }
 }
@@ -2396,13 +2475,6 @@ static int init_runtime_bus(const canopen_bus_config_t *bus, int bus_index)
         CO_RPDO_initCallbackPre(&co->RPDO[slot],
                                 &g_runtime_buses[bus_index].rpdo_callback_context[slot],
                                 canopen_rpdo_signal_pre);
-        plugin_logger_info(&g_logger,
-                           "CANopen local RPDO input callback bound: bus=%s slot=%u cob_id=0x%03X "
-                           "node_id=%u mappings=%u",
-                           bus->name, slot,
-                           (unsigned)g_runtime_buses[bus_index].input_rpdo_cob_id[slot],
-                           g_runtime_buses[bus_index].input_rpdo_node_id[slot],
-                           g_runtime_buses[bus_index].input_binding_count[slot]);
     }
 
     CO_CANsetNormalMode(co->CANmodule);
