@@ -91,7 +91,7 @@ CXXFLAGS := -std=c++17 -O1 -pipe -fPIC -Wall -Wextra -fstack-protector-strong -D
 # same trick MatIEC's compile.sh used: force-include iec_python.h on
 # the generated TUs so unqualified references resolve. Stubs without
 # any Python POU pay nothing; the header is declarations only.
-GENERATED_CXXFLAGS := $(CXXFLAGS) -include iec_python.h -include generated.hpp
+GENERATED_CXXFLAGS := $(CXXFLAGS) -include iec_python.h
 
 # ---------------------------------------------------------------------------
 # Retain capability probe.
