@@ -1,7 +1,9 @@
+import filecmp
 import glob
 import os
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 import zipfile
@@ -172,6 +174,29 @@ def safe_extract(zip_path, dest_dir, valid_files):
                 dst.write(src.read())
 
             logger.debug("Extracted: %s", out_path)
+
+
+def replace_generated_files(zip_path, dest_dir, valid_files):
+    """Replace an upload while keeping unchanged sources older than their objects."""
+    parent_dir = os.path.dirname(os.path.abspath(dest_dir))
+    with tempfile.TemporaryDirectory(dir=parent_dir) as staged_dir:
+        safe_extract(zip_path, staged_dir, valid_files)
+
+        if os.path.isdir(dest_dir):
+            for root, _, filenames in os.walk(staged_dir):
+                for filename in filenames:
+                    new_path = os.path.join(root, filename)
+                    old_path = os.path.join(dest_dir, os.path.relpath(new_path, staged_dir))
+                    if not is_inside_root(old_path, dest_dir) or not os.path.isfile(old_path):
+                        continue
+                    if filecmp.cmp(new_path, old_path, shallow=False):
+                        previous = os.stat(old_path)
+                        current = os.stat(new_path)
+                        os.utime(new_path, ns=(current.st_atime_ns, previous.st_mtime_ns))
+
+            shutil.rmtree(dest_dir)
+
+        os.rename(staged_dir, dest_dir)
 
 
 def update_plugin_configurations(generated_dir: str = "core/generated"):

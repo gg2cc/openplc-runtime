@@ -36,8 +36,8 @@ from webserver.plcapp_management import (
     apply_retain_conf,
     apply_vpp_plugin_conf,
     build_state,
+    replace_generated_files,
     run_compile,
-    safe_extract,
     update_plugin_configurations,
 )
 from webserver.restapi import (
@@ -375,10 +375,7 @@ def handle_upload_file(data: dict) -> dict:
         # is no longer running.
         project_snapshot.clear()
 
-        if os.path.exists(extract_dir):
-            shutil.rmtree(extract_dir)
-
-        safe_extract(zip_file, extract_dir, valid_files)
+        replace_generated_files(zip_file, extract_dir, valid_files)
 
         # Apply VPP plugin conf from upload (copy if present, delete if not)
         apply_vpp_plugin_conf(extract_dir)
