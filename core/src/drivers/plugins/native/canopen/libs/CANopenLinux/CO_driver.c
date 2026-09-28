@@ -45,6 +45,51 @@ pthread_mutex_t CO_EMCY_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_mutex_t CO_OD_mutex = PTHREAD_MUTEX_INITIALIZER;
 #endif
 
+#define CO_CAN_TX_LOG_INTERVAL_MS 5000U
+
+static bool_t CO_CANtxLogAllowed(void)
+{
+    static uint64_t lastLogMs = 0;
+    struct timespec now;
+    int savedErrno = errno;
+
+    if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+        errno = savedErrno;
+        return true;
+    }
+
+    uint64_t nowMs = ((uint64_t)now.tv_sec * 1000U)
+                   + ((uint64_t)now.tv_nsec / 1000000U);
+    uint64_t previousMs = __atomic_load_n(&lastLogMs, __ATOMIC_RELAXED);
+
+    while (previousMs == 0 || nowMs - previousMs >= CO_CAN_TX_LOG_INTERVAL_MS) {
+        if (__atomic_compare_exchange_n(&lastLogMs, &previousMs, nowMs, false,
+                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+            errno = savedErrno;
+            return true;
+        }
+    }
+
+    errno = savedErrno;
+    return false;
+}
+
+static void CO_CANlogTxFailure(uint32_t ident, const char *ifName,
+                               const char *operation)
+{
+    int savedErrno = errno;
+
+    if (CO_CANtxLogAllowed()) {
+        log_printf(LOG_ERR, DBG_CAN_TX_FAILED, ident, ifName);
+        if (operation != NULL) {
+            errno = savedErrno;
+            log_printf(LOG_DEBUG, DBG_ERRNO, operation);
+        }
+    }
+
+    errno = savedErrno;
+}
+
 #if CO_DRIVER_MULTI_INTERFACE == 0
 static CO_ReturnError_t CO_CANmodule_addInterface(CO_CANmodule_t *CANmodule,
                                                   int can_ifindex);
@@ -631,8 +676,7 @@ static CO_ReturnError_t CO_CANCheckSendInterface(
 #if CO_DRIVER_ERROR_REPORTING > 0
         interface->errorhandler.CANerrorStatus |= CO_CAN_ERRTX_OVERFLOW;
 #endif
-        log_printf(LOG_ERR, DBG_CAN_TX_FAILED, buffer->ident, interface->ifName);
-        log_printf(LOG_DEBUG, DBG_ERRNO, "send()");
+    CO_CANlogTxFailure(buffer->ident, interface->ifName, "send()");
         err = CO_ERROR_TX_OVERFLOW;
     }
 
@@ -667,8 +711,7 @@ CO_ReturnError_t CO_CANsend(CO_CANmodule_t *CANmodule, CO_CANtx_t *buffer)
     err = CO_CANCheckSend(CANmodule, buffer);
     if (err == CO_ERROR_TX_BUSY) {
         /* send doesn't have "busy" */
-        log_printf(LOG_ERR, DBG_CAN_TX_FAILED, buffer->ident, "CANx");
-        log_printf(LOG_DEBUG, DBG_ERRNO, "send()");
+        CO_CANlogTxFailure(buffer->ident, "CANx", "send()");
         err = CO_ERROR_TX_OVERFLOW;
     }
     return err;
@@ -729,7 +772,7 @@ CO_ReturnError_t CO_CANsend(CO_CANmodule_t *CANmodule, CO_CANtx_t *buffer)
 #if CO_DRIVER_ERROR_REPORTING > 0
         interface->errorhandler.CANerrorStatus |= CO_CAN_ERRTX_OVERFLOW;
 #endif
-        log_printf(LOG_ERR, DBG_CAN_TX_FAILED, buffer->ident, interface->ifName);
+        CO_CANlogTxFailure(buffer->ident, interface->ifName, NULL);
         err = CO_ERROR_TX_OVERFLOW;
     }
 
