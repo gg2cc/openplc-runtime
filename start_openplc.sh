@@ -61,7 +61,17 @@ check_installation()
 check_installation
 check_root
 
+RUNTIME_VERSION="${RUNTIME_VERSION:-}"
+if [[ -z "$RUNTIME_VERSION" || "$RUNTIME_VERSION" == "dev" ]]; then
+    if [[ -r "$OPENPLC_DIR/VERSION" ]]; then
+        RUNTIME_VERSION="$(sed 's/^[[:space:]]*//; s/[[:space:]]*$//' "$OPENPLC_DIR/VERSION")"
+    else
+        RUNTIME_VERSION="dev"
+    fi
+fi
+
 echo "Starting OpenPLC Runtime"
+echo "Runtime version: $RUNTIME_VERSION"
 echo "Project directory: $OPENPLC_DIR"
 echo "Working directory: $(pwd)"
 
