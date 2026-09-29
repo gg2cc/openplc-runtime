@@ -145,7 +145,7 @@ static void init_hardware_defaults(can_hardware_config_t *hw)
     hw->bitrate         = 500000;
     hw->sjw             = 1;
     hw->sample_point    = 0.875;
-    hw->restart_ms      = 100;
+    hw->restart_ms      = 1000;
     hw->auto_bringup    = true;
     hw->triple_sampling = false;
 }

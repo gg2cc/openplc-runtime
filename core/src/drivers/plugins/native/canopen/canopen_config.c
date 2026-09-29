@@ -428,7 +428,7 @@ static void parse_bus(cJSON *item, canopen_bus_config_t *bus, plugin_logger_t *l
     bus->bitrate         = 500000;
     bus->sjw             = 1U;
     bus->sample_point    = 0.875;
-    bus->restart_ms      = 100U;
+    bus->restart_ms      = 1000U;
     bus->triple_sampling = false;
     bus->auto_bringup    = true;
     bus->local_node_id   = 127U;

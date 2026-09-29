@@ -201,6 +201,9 @@ int can_netlink_configure_and_up(const can_hardware_config_t *hw, plugin_logger_
     req.ifi.ifi_family = AF_UNSPEC;
     req.ifi.ifi_index  = ifindex;
 
+    uint32_t tx_queue_len = 128;
+    add_attr(&req.nh, sizeof(req), IFLA_TXQLEN, &tx_queue_len, sizeof(tx_queue_len));
+
     /* IFLA_LINKINFO nest */
     struct rtattr *linkinfo = nest_attr(&req.nh, sizeof(req), IFLA_LINKINFO);
     if (linkinfo)
