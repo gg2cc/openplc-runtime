@@ -593,11 +593,20 @@ build_native_plugins() {
 
 
 # EtherDOG, the EtherCAT master service supervised by the webserver. Its source stays in the install.
-ETHERDOG_REPO="${ETHERDOG_REPO:-https://github.com/Autonomy-Logic/EtherDOG.git}"
+ETHERDOG_REPO="${ETHERDOG_REPO:-git@github.com:Autonomy-Logic/EtherDOG.git}"
 ETHERDOG_REF="${ETHERDOG_REF:-main}"
+
+configure_etherdog_ssh_urls() {
+    local src="$1"
+    [ -e "$src/.git" ] || return 0
+
+    git -C "$src" config --local --replace-all \
+        url."git@github.com:".insteadOf "https://github.com/"
+}
 
 build_etherdog() {
     local src="${ETHERDOG_SRC:-}"
+    local github_https_to_ssh='url.git@github.com:.insteadOf=https://github.com/'
     if [ -z "$src" ] && [ -f "$OPENPLC_DIR/etherdog/CMakeLists.txt" ]; then
         src="$OPENPLC_DIR/etherdog"
     fi
@@ -605,20 +614,29 @@ build_etherdog() {
         src="$OPENPLC_DIR/third_party/etherdog"
         if [ -d "$src/.git" ]; then
             log_info "Updating EtherDOG ($ETHERDOG_REF)..."
-            if ! { git -C "$src" fetch --quiet --depth 1 origin "$ETHERDOG_REF" &&
-                   git -C "$src" checkout --quiet --force FETCH_HEAD &&
-                   git -C "$src" submodule update --quiet --init --recursive --depth 1; }; then
+            if ! configure_etherdog_ssh_urls "$src" ||
+               ! { git -C "$src" fetch --quiet --depth 1 origin "$ETHERDOG_REF" &&
+                   git -C "$src" checkout --quiet --force FETCH_HEAD; }; then
                 log_warning "Could not update EtherDOG; building the existing copy."
             fi
         elif [ ! -f "$src/CMakeLists.txt" ]; then
             log_info "Fetching EtherDOG ($ETHERDOG_REF) from $ETHERDOG_REPO..."
             rm -rf "$src"
             mkdir -p "$(dirname "$src")"
-            if ! git clone --quiet --depth 1 --branch "$ETHERDOG_REF" --recurse-submodules \
-                    --shallow-submodules "$ETHERDOG_REPO" "$src"; then
+            if ! git clone --quiet --depth 1 --branch "$ETHERDOG_REF" "$ETHERDOG_REPO" "$src"; then
                 log_warning "Could not fetch EtherDOG; EtherCAT will be unavailable."
                 return 0
             fi
+        fi
+    fi
+
+    if [ -f "$src/.gitmodules" ] && [ -e "$src/.git" ]; then
+        log_info "Fetching EtherDOG submodules over SSH..."
+                if ! configure_etherdog_ssh_urls "$src" ||
+                     ! git -C "$src" -c "$github_https_to_ssh" submodule sync --recursive ||
+                     ! git -C "$src" -c "$github_https_to_ssh" submodule update --init --recursive --depth 1; then
+            log_warning "Could not fetch EtherDOG submodules; EtherCAT will be unavailable."
+            return 0
         fi
     fi
 

@@ -125,3 +125,17 @@ sudo umount ~/mount_dir
 1. **不需要打包/解压压缩包**：宿主机直接 `cp -a` 目录到挂载点 `~/mount_dir/opt/`，秒级传输。
 2. **无需处理交叉编译/下载平台参数**：因为配合 `qemu-aarch64-static`，`pip install` 会自动识别出当前是 ARM64 + CPython 3.10 环境并自动下载正确的 wheel 包。
 3. **一次性固化到镜像**：`install.sh` 编译出的可执行文件 `build/plc_main`、生成的插件环境以及开机服务配置，都已经直接写入到了 `rootfs.img` 中。烧录镜像到 RK3562 后，通电开机即可直接运行。
+
+# 在 docker 中编译 runtime
+## 1, 拷贝项目到 /home/ld/docker_ws/openplc-runtime
+## 2, 设置环境变量
+```bash
+export PYTHON_BIN=/opt/python310/bin/python3.10
+export PY310_PATH=/opt/python310
+export CFLAGS="-I$PY310_PATH/include/python3.10"
+export LDFLAGS="-L$PY310_PATH/lib -lpython3.10"
+```
+## 3, 编译
+```bash
+PYTHON_BIN=/opt/python310/bin/python3.10 ./install.sh --native
+```
