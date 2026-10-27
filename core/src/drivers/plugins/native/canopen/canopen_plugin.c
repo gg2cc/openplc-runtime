@@ -2035,7 +2035,7 @@ static void canopen_add_pdo_mapping_sdos(const canopen_slave_config_t *slave,
         entries[count].data_type[0]  = 'u';
         entries[count].data_type[1]  = '1';
         entries[count].data_type[2]  = '6';
-        entries[count].default_value = 500; // the inhibit time of the TPDO in milliseconds
+        entries[count].default_value = 10; // the inhibit time of the TPDO in milliseconds
         count++;
 
         snprintf(entries[count].name, sizeof(entries[count].name), "rpdo_%d_event_timer", p + 1);
