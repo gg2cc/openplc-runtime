@@ -147,14 +147,13 @@ Authorization: Bearer <token>
 **Response:**
 ```json
 {
-  "status": "PLC stopped successfully"
+  "status": "STOP:OK\n"
 }
 ```
 
 **Possible Status Values:**
-- `"PLC stopped successfully"` - PLC transitioned to STOPPED state
-- `"PLC is already stopped"` - PLC was already in STOPPED state
-- `"No response from runtime"` - Runtime process not responding
+- `"STOP:OK\n"` - PLC transitioned to STOPPED state
+- `"STOP:ERROR\n"` - PLC was already stopped or the stop request failed
 
 ---
 
