@@ -412,39 +412,45 @@ static void canopen_hb_state_changed(uint8_t nodeId, uint8_t idx, CO_NMT_interna
 
     runtime->last_heartbeat_ms = canopen_now_ms();
 
+    /* Boot-up and Pre-Operational are expected until every monitored node is Operational. */
     if (state == CO_NMT_INITIALIZING)
     {
         runtime->bootup_seen        = true;
-        runtime->reconnect_required = true;
-        runtime->startup_confirmed  = false;
-        runtime->startup_sdo_sent   = false;
-        runtime->startup_reset_sent = false;
         runtime->last_bootup_ms     = runtime->last_heartbeat_ms;
-        plugin_logger_warn(
-            &g_logger,
-            "CANopen lifecycle: boot-up detected from node %u, restarting start sequence", nodeId);
+        if (runtime->startup_confirmed)
+        {
+            runtime->reconnect_required = true;
+            runtime->startup_confirmed  = false;
+            runtime->startup_sdo_sent   = false;
+            runtime->startup_reset_sent = false;
+            plugin_logger_warn(
+                &g_logger,
+                "CANopen lifecycle: unexpected boot-up from node %u; scheduling recovery",
+                nodeId);
+        }
         return;
     }
 
     if (state == CO_NMT_OPERATIONAL)
     {
-        runtime->startup_confirmed  = true;
-        runtime->reconnect_required = false;
-        runtime->startup_sdo_sent   = false;
-        runtime->retry_count        = 0U;
         plugin_logger_info(
-            &g_logger, "CANopen lifecycle: node %u reached Operational; startup confirmed", nodeId);
+            &g_logger, "CANopen lifecycle: node %u reached Operational", nodeId);
         return;
     }
 
     if (state == CO_NMT_STOPPED || state == CO_NMT_PRE_OPERATIONAL)
     {
-        runtime->startup_confirmed  = false;
-        runtime->reconnect_required = true;
-        runtime->startup_sdo_sent   = false;
-        runtime->startup_reset_sent = false;
-        plugin_logger_warn(&g_logger, "CANopen lifecycle: node %u not operational yet (state=%d)",
-                           nodeId, state);
+        if (runtime->startup_confirmed)
+        {
+            runtime->startup_confirmed  = false;
+            runtime->reconnect_required = true;
+            runtime->startup_sdo_sent   = false;
+            runtime->startup_reset_sent = false;
+            plugin_logger_warn(
+                &g_logger, "CANopen lifecycle: node %u left Operational (state=%d); "
+                           "scheduling recovery",
+                nodeId, state);
+        }
     }
 }
 
@@ -535,16 +541,12 @@ static void canopen_runtime_lifecycle_tick(const canopen_bus_config_t *bus,
         }
     }
 
-    if (any_bootup)
+    if (any_bootup && runtime->startup_confirmed)
     {
-        if (runtime->startup_confirmed || !runtime->reconnect_required)
-        {
-            plugin_logger_warn(
-                &g_logger,
-                "CANopen lifecycle: boot-up detected on bus=%s (slave in Pre-Operational), "
-                "restarting start sequence...",
-                bus->name);
-        }
+        plugin_logger_warn(
+            &g_logger,
+            "CANopen lifecycle: unexpected boot-up on bus=%s; scheduling recovery",
+            bus->name);
         runtime->bootup_seen        = true;
         runtime->reconnect_required = true;
         runtime->startup_confirmed  = false;
@@ -1947,11 +1949,11 @@ static bool canopen_send_sdo_write(canopen_runtime_bus_t *runtime, uint8_t node_
 
     pthread_mutex_unlock(&runtime->stack_mutex);
 
-    plugin_logger_info(&g_logger,
-                       "SDO write sent : local node=%u target_node=%u index=0x%04X sub=%u "
-                       "len=%zu value=0x%08X",
-                       co->NMT->nodeId, node_id, entry->index, entry->sub_index, payload_len,
-                       entry->default_value);
+    // plugin_logger_info(&g_logger,
+    //                    "SDO write sent : local node=%u target_node=%u index=0x%04X sub=%u "
+    //                    "len=%zu value=0x%08X",
+    //                    co->NMT->nodeId, node_id, entry->index, entry->sub_index, payload_len,
+    //                    entry->default_value);
     return true;
 }
 
@@ -1980,13 +1982,21 @@ static void canopen_add_pdo_mapping_sdos(const canopen_slave_config_t *slave,
         uint32_t cob_id =
             (uint32_t)(0x180U + ((uint32_t)(comm_index - 0x1800U) * 0x100U) + slave->node_id);
 
-        snprintf(entries[count].name, sizeof(entries[count].name), "rpdo_%d_map_count", p + 1);
+        snprintf(entries[count].name, sizeof(entries[count].name), "rpdo_%d_disable", p + 1);
+        entries[count].index         = comm_index;
+        entries[count].sub_index     = 1U;
+        entries[count].data_type[0]  = 'u';
+        entries[count].data_type[1]  = '3';
+        entries[count].data_type[2]  = '2';
+        entries[count].default_value = (int32_t)(cob_id | 0x80000000U);
+        count++;
+
+        snprintf(entries[count].name, sizeof(entries[count].name), "rpdo_%d_map_clear", p + 1);
         entries[count].index        = map_index;
         entries[count].sub_index    = 0U;
         entries[count].data_type[0] = 'u';
         entries[count].data_type[1] = '8';
-        entries[count].default_value =
-            pdo->mapping_count; // the number of mapped application objects in the PDO
+        entries[count].default_value = 0;
         count++;
 
         for (int m = 0; m < pdo->mapping_count; m++)
@@ -2012,13 +2022,12 @@ static void canopen_add_pdo_mapping_sdos(const canopen_slave_config_t *slave,
             count++;
         }
 
-        snprintf(entries[count].name, sizeof(entries[count].name), "rpdo_%d_cob_id", p + 1);
-        entries[count].index         = comm_index;
-        entries[count].sub_index     = 1U;
+        snprintf(entries[count].name, sizeof(entries[count].name), "rpdo_%d_map_count", p + 1);
+        entries[count].index         = map_index;
+        entries[count].sub_index     = 0U;
         entries[count].data_type[0]  = 'u';
-        entries[count].data_type[1]  = '3';
-        entries[count].data_type[2]  = '2';
-        entries[count].default_value = (int32_t)cob_id; // the COB-ID used by the RPDO
+        entries[count].data_type[1]  = '8';
+        entries[count].default_value = pdo->mapping_count;
         count++;
 
         snprintf(entries[count].name, sizeof(entries[count].name), "rpdo_%d_trans_type", p + 1);
@@ -2035,7 +2044,8 @@ static void canopen_add_pdo_mapping_sdos(const canopen_slave_config_t *slave,
         entries[count].data_type[0]  = 'u';
         entries[count].data_type[1]  = '1';
         entries[count].data_type[2]  = '6';
-        entries[count].default_value = 10; // the inhibit time of the TPDO in milliseconds
+        entries[count].default_value =
+            pdo->inhibit_time; // TPDO inhibit time : 步科单位为1ms;雷赛0.1ms
         count++;
 
         snprintf(entries[count].name, sizeof(entries[count].name), "rpdo_%d_event_timer", p + 1);
@@ -2046,6 +2056,15 @@ static void canopen_add_pdo_mapping_sdos(const canopen_slave_config_t *slave,
         entries[count].data_type[2] = '6';
         entries[count].default_value =
             0; // the event timer of the TPDO in milliseconds (0 means no event timer)
+        count++;
+
+        snprintf(entries[count].name, sizeof(entries[count].name), "rpdo_%d_cob_id", p + 1);
+        entries[count].index         = comm_index;
+        entries[count].sub_index     = 1U;
+        entries[count].data_type[0]  = 'u';
+        entries[count].data_type[1]  = '3';
+        entries[count].data_type[2]  = '2';
+        entries[count].default_value = (int32_t)cob_id;
         count++;
     }
 
@@ -2063,13 +2082,21 @@ static void canopen_add_pdo_mapping_sdos(const canopen_slave_config_t *slave,
         uint32_t cob_id =
             (uint32_t)(0x200U + ((uint32_t)(comm_index - 0x1400U) * 0x100U) + slave->node_id);
 
-        snprintf(entries[count].name, sizeof(entries[count].name), "tpdo_%d_map_count", p + 1);
+        snprintf(entries[count].name, sizeof(entries[count].name), "tpdo_%d_disable", p + 1);
+        entries[count].index         = comm_index;
+        entries[count].sub_index     = 1U;
+        entries[count].data_type[0]  = 'u';
+        entries[count].data_type[1]  = '3';
+        entries[count].data_type[2]  = '2';
+        entries[count].default_value = (int32_t)(cob_id | 0x80000000U);
+        count++;
+
+        snprintf(entries[count].name, sizeof(entries[count].name), "tpdo_%d_map_clear", p + 1);
         entries[count].index        = map_index;
         entries[count].sub_index    = 0U;
         entries[count].data_type[0] = 'u';
         entries[count].data_type[1] = '8';
-        entries[count].default_value =
-            pdo->mapping_count; // the number of mapped application objects in the PDO
+        entries[count].default_value = 0;
         count++;
 
         for (int m = 0; m < pdo->mapping_count; m++)
@@ -2095,13 +2122,12 @@ static void canopen_add_pdo_mapping_sdos(const canopen_slave_config_t *slave,
             count++;
         }
 
-        snprintf(entries[count].name, sizeof(entries[count].name), "tpdo_%d_cob_id", p + 1);
-        entries[count].index         = comm_index;
-        entries[count].sub_index     = 1U;
+        snprintf(entries[count].name, sizeof(entries[count].name), "tpdo_%d_map_count", p + 1);
+        entries[count].index         = map_index;
+        entries[count].sub_index     = 0U;
         entries[count].data_type[0]  = 'u';
-        entries[count].data_type[1]  = '3';
-        entries[count].data_type[2]  = '2';
-        entries[count].default_value = (int32_t)cob_id; // the COB-ID used by the TPDO
+        entries[count].data_type[1]  = '8';
+        entries[count].default_value = pdo->mapping_count;
         count++;
 
         snprintf(entries[count].name, sizeof(entries[count].name), "tpdo_%d_trans_type", p + 1);
@@ -2112,13 +2138,13 @@ static void canopen_add_pdo_mapping_sdos(const canopen_slave_config_t *slave,
         entries[count].default_value = 0xFE; // the transmission type of the TPDO
         count++;
 
-        snprintf(entries[count].name, sizeof(entries[count].name), "tpdo_%d_inhibit_time", p + 1);
+        snprintf(entries[count].name, sizeof(entries[count].name), "tpdo_%d_cob_id", p + 1);
         entries[count].index         = comm_index;
-        entries[count].sub_index     = 3U;
+        entries[count].sub_index     = 1U;
         entries[count].data_type[0]  = 'u';
-        entries[count].data_type[1]  = '1';
-        entries[count].data_type[2]  = '6';
-        entries[count].default_value = 0; // the inhibit time of the TPDO in milliseconds
+        entries[count].data_type[1]  = '3';
+        entries[count].data_type[2]  = '2';
+        entries[count].default_value = (int32_t)cob_id;
         count++;
     }
 
@@ -2217,8 +2243,8 @@ static bool canopen_send_configured_sdos(const canopen_bus_config_t *bus,
             sent_count++;
         }
 
-        canopen_sdo_entry_t generated_sdos[(CANOPEN_LOCAL_RPDO_MAX + CANOPEN_LOCAL_TPDO_MAX) *
-                                           (CANOPEN_LOCAL_RPDO_MAX_MAPPINGS + 4U)];
+        canopen_sdo_entry_t generated_sdos[2U * CANOPEN_PDOS_PER_SLAVE *
+                                           (MAX_CANOPEN_PDO_MAPPING + 7U)];
         int generated_sdo_count = 0;
         memset(generated_sdos, 0, sizeof(generated_sdos));
         canopen_add_pdo_mapping_sdos(slave, generated_sdos, &generated_sdo_count);

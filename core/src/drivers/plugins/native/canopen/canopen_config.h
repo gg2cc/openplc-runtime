@@ -59,6 +59,7 @@ extern "C"
         char name[MAX_CANOPEN_NAME_LEN];
         uint16_t index;
         uint8_t sub_index;
+        uint16_t inhibit_time;
         int mapping_count;
         canopen_pdo_mapping_t mapping[MAX_CANOPEN_PDO_MAPPING];
     } canopen_pdo_t;

@@ -404,6 +404,15 @@ sudo bash scripts/manage_plugin_venvs.sh list
 
 **For complete plugin documentation, see [docs/PLUGIN_VENV_GUIDE.md](docs/PLUGIN_VENV_GUIDE.md) and [core/src/drivers/README.md](core/src/drivers/README.md).**
 
+The CANopen plugin configures each mapped PDO in Pre-Operational state: it disables
+the PDO, clears the mapping count, writes the mapping entries and final count,
+sets communication parameters, and enables the PDO. Both the disable and enable
+writes use COB-IDs from the predefined connection set, so devices with a different
+active COB-ID may reject the disable write. Devices must support writable dynamic
+PDO mapping and the configured communication parameters; an SDO abort stops startup
+and is logged. A failure during configuration can leave the PDO disabled. Run the host sequence tests with
+`make -C core/src/drivers/plugins/native/canopen test-pdo-mapping`.
+
 ## Security
 
 ### TLS/HTTPS
