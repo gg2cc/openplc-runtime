@@ -5,6 +5,7 @@
 
 #include "can_config.h"
 #include "cJSON.h"
+#include <errno.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,23 +35,27 @@ static int data_type_width(can_data_type_t type)
 static int parse_plc_address(const char *address, bool input, can_data_type_t type,
                              int *journal_type, int *index, int *bit)
 {
-    if (!address || !journal_type || !index || !bit || address[0] != '%' ||
+    if (!address || strlen(address) < 4 || !journal_type || !index || !bit || address[0] != '%' ||
         (input ? strncasecmp(address + 1, "I", 1) : strncasecmp(address + 1, "Q", 1)) != 0)
         return -1;
     char kind = (char)address[2];
     if (kind >= 'a' && kind <= 'z')
         kind -= 'a' - 'A';
     const char *digits = address + 3;
+    if (*digits < '0' || *digits > '9')
+        return -1;
     char *end          = NULL;
+    errno              = 0;
     long parsed        = strtol(digits, &end, 10);
-    if (end == digits || parsed < 0 || parsed > INT_MAX)
+    if (errno == ERANGE || end == digits || parsed < 0 || parsed > INT_MAX)
         return -1;
     int parsed_bit = -1;
     if (*end == '.')
     {
-        parsed_bit = (int)strtol(end + 1, &end, 10);
-        if (end == address || parsed_bit < 0 || parsed_bit > 7)
+        if (end[1] < '0' || end[1] > '7' || end[2] != '\0')
             return -1;
+        parsed_bit = end[1] - '0';
+        end += 2;
     }
     if (*end != '\0')
         return -1;
@@ -372,6 +377,20 @@ static int parse_tx_frames(cJSON *tx_arr, can_interface_config_t *iface, plugin_
 
         cJSON *cycle         = cJSON_GetObjectItem(item, "cycle_time_ms");
         frame->cycle_time_ms = (cycle && cJSON_IsNumber(cycle)) ? (uint32_t)cycle->valueint : 10;
+
+        cJSON *enable = cJSON_GetObjectItem(item, "enable_plc_address");
+        if (enable)
+        {
+            int journal_type = 0;
+            if (!cJSON_IsString(enable) || !enable->valuestring ||
+                parse_plc_address(enable->valuestring, false, CAN_DATA_BOOL, &journal_type,
+                                  &frame->enable_plc_index, &frame->enable_plc_bit) != 0)
+            {
+                plugin_logger_error(logger, "Invalid TX frame enable_plc_address at index %d", i);
+                return -1;
+            }
+            frame->has_enable = true;
+        }
 
         cJSON *mappings = cJSON_GetObjectItem(item, "mappings");
         if (frame->dlc > 8 || parse_mappings(mappings, frame->mappings, &frame->mapping_count,

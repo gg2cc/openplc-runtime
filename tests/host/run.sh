@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Autonomy®
 
-# Host tests: plain C++17 executables, no framework, no device. For
+# Host tests: plain C and C++17 executables, no framework, no device. For
 # runtime code Ceedling cannot reach (uses std::thread/mutex) and that
 # needs no plc_main. Add a test by appending it to TESTS below.
 
@@ -14,7 +14,7 @@ CXX="${CXX:-c++}"
 CXXFLAGS="-std=c++17 -Wall -Wextra -Wno-unused-parameter -g"
 # Python headers: plugin_driver.h includes Python.h.
 PY_INCLUDE=$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["include"])')
-INCLUDES="-Icore/src/plc_app -Icore/src -I$PY_INCLUDE"
+INCLUDES="-Icore/src/plc_app -Icore/src -I$PY_INCLUDE -Icore/src/drivers -Icore/src/drivers/plugins/native -Icore/src/drivers/plugins/native/cjson"
 
 OUT=$(mktemp -d)
 trap 'rm -rf "$OUT"' EXIT
@@ -26,13 +26,14 @@ TESTS=(
   "tests/host/test_task_policy.cpp:core/src/plc_app/task_policy.c"
   "tests/host/test_image_outputs.cpp:core/src/plc_app/image_tables.cpp:core/src/plc_app/located_globals.c"
   "tests/host/test_plc_boot.cpp:core/src/plc_app/plc_boot.c:core/src/plc_app/plc_switch.c:core/src/drivers/plugin_plc_requests.c"
+  "tests/host/test_can_plugin.c:core/src/drivers/plugins/native/can/can_config.c:core/src/drivers/plugins/native/can/can_socket.c:core/src/drivers/plugins/native/can/can_netlink.c:core/src/drivers/plugins/native/plugin_logger.c:core/src/drivers/plugins/native/cjson/cJSON.c"
 )
 
 failures=0
 for entry in "${TESTS[@]}"; do
   test_src="${entry%%:*}"
   deps="${entry#*:}"
-  name=$(basename "$test_src" .cpp)
+  name=$(basename "${test_src%.*}")
 
   printf '\n=== %s ===\n' "$name"
   # C sources are compiled as C, not C++.
@@ -47,8 +48,14 @@ for entry in "${TESTS[@]}"; do
       objs+=("$dep")
     fi
   done
+  compiler="$CXX"
+  flags="$CXXFLAGS"
+  if [[ "$test_src" == *.c ]]; then
+    compiler="${CC:-cc}"
+    flags="-std=gnu11 -Wall -Wextra -g"
+  fi
   # shellcheck disable=SC2086
-  if ! $CXX $CXXFLAGS $INCLUDES "$test_src" ${objs[@]+"${objs[@]}"} -o "$OUT/$name" -lpthread; then
+  if ! $compiler $flags $INCLUDES "$test_src" ${objs[@]+"${objs[@]}"} -o "$OUT/$name" -lpthread; then
     echo "  FAIL  $name did not compile"
     failures=$((failures + 1))
     continue

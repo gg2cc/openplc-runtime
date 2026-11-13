@@ -294,7 +294,25 @@ int init(void *args)
     if (can_config_parse(cfg_path, &g_config, &g_logger) != 0)
     {
         plugin_logger_error(&g_logger, "Failed to parse CAN configuration file");
+        can_config_free(&g_config);
         return -1;
+    }
+
+    for (int iface_idx = 0; iface_idx < g_config.interface_count; iface_idx++)
+    {
+        can_interface_config_t *iface = &g_config.interfaces[iface_idx];
+        for (int i = 0; i < iface->tx_frame_count; i++)
+        {
+            const can_tx_frame_config_t *frame = &iface->tx_frames[i];
+            if (frame->has_enable && frame->enable_plc_index >= g_args.buffer_size)
+            {
+                plugin_logger_error(&g_logger,
+                                    "TX frame #%d on %s has an out-of-range enable BOOL output", i,
+                                    iface->hardware.interface);
+                can_config_free(&g_config);
+                return -1;
+            }
+        }
     }
 
     plugin_logger_info(&g_logger, "CAN Plugin initialized successfully");
@@ -388,6 +406,10 @@ void cycle_end(void)
         for (int i = 0; i < iface->tx_frame_count; i++)
         {
             can_tx_frame_config_t *frame = &iface->tx_frames[i];
+            if (frame->has_enable &&
+                !*g_args.bool_output[frame->enable_plc_index][frame->enable_plc_bit])
+                continue;
+
             uint8_t payload[8]           = {0};
 
             for (int j = 0; j < frame->mapping_count; j++)

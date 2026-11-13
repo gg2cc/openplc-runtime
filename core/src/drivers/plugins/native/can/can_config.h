@@ -75,6 +75,9 @@ extern "C"
         can_byte_order_t byte_order;
         can_tx_trigger_t trigger;
         uint32_t cycle_time_ms;
+        bool has_enable;
+        int enable_plc_index;
+        int enable_plc_bit;
         uint64_t last_send_time_ms;
         uint8_t prev_payload[8];
         bool has_sent_once;

@@ -11,6 +11,21 @@ OpenPLC Runtime v4 consists of two main components:
 
 The runtime executes programs created in the OpenPLC Editor, supporting IEC 61131-3 programming languages (Ladder Logic, Structured Text, Function Block Diagram, etc.).
 
+## CAN TX frame enable
+
+In `conf/can.json`, each `interfaces[].tx_frames[]` entry accepts an optional
+`"enable_plc_address": "%QX10.0"` field referencing a PLC BOOL output.
+Omit it to preserve existing behavior. With it configured, `FALSE` suppresses
+transmission; `TRUE` permits the existing cyclic/on-change trigger. The bit is
+not included in the CAN payload.
+
+Disabling does not update the last send time or last transmitted payload.
+Re-enabling does not force a transmission: cyclic frames send when due and
+on-change frames send only if the payload differs or has never been sent.
+Malformed or out-of-range addresses fail initialization with an error.
+The output must be available when starting the plugin; declare a located BOOL
+at the configured `%QX` address in the PLC program.
+
 ## Quick Start
 
 ### Docker (Recommended)
