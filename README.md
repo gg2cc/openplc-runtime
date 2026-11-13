@@ -412,6 +412,8 @@ active COB-ID may reject the disable write. Devices must support writable dynami
 PDO mapping and the configured communication parameters; an SDO abort stops startup
 and is logged. A failure during configuration can leave the PDO disabled. Run the host sequence tests with
 `make -C core/src/drivers/plugins/native/canopen test-pdo-mapping`.
+For PDOs sent by a slave to the master, set `event_time` in the slave's `rpdo`
+configuration to control the TPDO event timer in milliseconds; `0` disables it.
 
 ## Security
 

@@ -83,6 +83,7 @@
               "name": "rpdo_1",
               "index": 6144,
               "inhibit_time": 10,
+              "event_time": 0,
               "mapping": [
                 {
                   "index": 24641,
@@ -106,6 +107,7 @@
               "name": "rpdo_2",
               "index": 6145,
               "inhibit_time": 10,
+              "event_time": 0,
               "mapping": [
                 {
                   "index": 24675,
@@ -196,6 +198,7 @@
               "name": "rpdo_1",
               "index": 6144,
               "inhibit_time": 10,
+              "event_time": 0,
               "mapping": [
                 {
                   "index": 24641,
@@ -219,6 +222,7 @@
               "name": "rpdo_2",
               "index": 6145,
               "inhibit_time": 10,
+              "event_time": 0,
               "mapping": [
                 {
                   "index": 24675,

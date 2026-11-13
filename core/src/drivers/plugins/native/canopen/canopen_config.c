@@ -260,6 +260,13 @@ static void parse_pdo(cJSON *items, int *count, canopen_pdo_t *pdo_list, const c
             pdo->inhibit_time = (uint16_t)inhibit_time->valueint;
         }
 
+        cJSON *event_time = cJSON_GetObjectItem(item, "event_time");
+        if (cJSON_IsNumber(event_time) && event_time->valueint >= 0 &&
+            event_time->valueint <= UINT16_MAX)
+        {
+            pdo->event_time = (uint16_t)event_time->valueint;
+        }
+
         cJSON *name = cJSON_GetObjectItem(item, "name");
         if (cJSON_IsString(name) && name->valuestring)
         {

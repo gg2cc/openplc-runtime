@@ -2055,7 +2055,7 @@ static void canopen_add_pdo_mapping_sdos(const canopen_slave_config_t *slave,
         entries[count].data_type[1] = '1';
         entries[count].data_type[2] = '6';
         entries[count].default_value =
-            0; // the event timer of the TPDO in milliseconds (0 means no event timer)
+            pdo->event_time; // TPDO event timer in milliseconds (0 disables the timer)
         count++;
 
         snprintf(entries[count].name, sizeof(entries[count].name), "rpdo_%d_cob_id", p + 1);
